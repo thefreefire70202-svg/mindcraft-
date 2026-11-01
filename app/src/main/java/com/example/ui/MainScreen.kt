@@ -16,8 +16,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -62,7 +62,7 @@ sealed class NavTab(val title: String, val icon: ImageVector, val tag: String) {
     object Bot : NavTab("Bot", Icons.Default.Dns, "nav_bot")
     object AiSetup : NavTab("AI Setup", Icons.Default.SmartToy, "nav_ai_setup")
     object PingServer : NavTab("Ping Server", Icons.Default.Wifi, "nav_ping_server")
-    object Logs : NavTab("Logs", Icons.Default.ListAlt, "nav_logs")
+    object Logs : NavTab("Logs", Icons.AutoMirrored.Filled.ListAlt, "nav_logs")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

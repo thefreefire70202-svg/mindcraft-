@@ -25,12 +25,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Wifi
@@ -641,7 +641,7 @@ fun DashboardScreen(
                                     }
                                 }
                             ) {
-                                Icon(Icons.Default.Send, contentDescription = "Send", tint = DiamondBlue)
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = DiamondBlue)
                             }
                         },
                         colors = OutlinedTextFieldDefaults.colors(
