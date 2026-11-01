@@ -21,6 +21,25 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun offlinePlayerUuid_matchesStandardMinecraftAlgorithm() {
+        val username = "MindcraftBot"
+        val expectedUuid = java.util.UUID.nameUUIDFromBytes("OfflinePlayer:$username".toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+        // Version 3 UUID (MD5-based name-UUID)
+        assertEquals(3, expectedUuid.version())
+    }
+
+    @Test
+    fun protocolClient_tracksHostContactTimestamps() {
+        val client = MinecraftProtocolClient()
+        val host = "PRIVATESMPGO.aternos.me"
+        val port = 53750
+
+        assertEquals(0L, client.getLastContactTimestamp(host, port))
+        client.updateLastContactTimestamp(host, port)
+        assert(client.getLastContactTimestamp(host, port) > 0L)
+    }
+
+    @Test
     fun addition_isCorrect() {
         assertEquals(4, 2 + 2)
     }

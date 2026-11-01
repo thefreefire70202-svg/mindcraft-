@@ -26,12 +26,15 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -96,7 +99,7 @@ fun DashboardScreen(
     var serverPortInput by remember { mutableStateOf(botState.serverPort.toString()) }
     var botNameInput by remember { mutableStateOf(botState.botName) }
     var chatInput by remember { mutableStateOf("") }
-    var directConnect by remember { mutableStateOf(false) }
+    var directConnect by remember { mutableStateOf(true) }
 
     val isOnline = botState.status == BotStatus.ONLINE
     val isConnecting = botState.status == BotStatus.CONNECTING

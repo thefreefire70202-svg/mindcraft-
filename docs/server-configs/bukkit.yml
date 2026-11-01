@@ -1,0 +1,33 @@
+# Recommended bukkit.yml to prevent Minecraft Bot disconnects & connection throttling
+# Place or edit in your server root directory (e.g. Aternos or dedicated server)
+settings:
+  allow-end: true
+  warn-on-overload: false
+  permissions-file: permissions.yml
+  update-folder: update
+  plugin-profiling: false
+  # CRITICAL: Set connection-throttle to 0 to completely disable Bukkit's reconnect throttle.
+  # This stops "Connection throttled! Please wait before reconnecting" errors permanently.
+  connection-throttle: 0
+  query-plugins: true
+  deprecated-verbose: default
+  shutdown-message: Server closed
+spawn-limits:
+  monsters: 70
+  animals: 10
+  water-animals: 15
+  water-ambient: 20
+  water-underground-creature: 5
+  ambient: 15
+  axolotls: 5
+chunk-gc:
+  period-in-ticks: 600
+ticks-per:
+  animal-spawns: 400
+  monster-spawns: 1
+  water-spawns: 1
+  water-ambient-spawns: 1
+  water-underground-creature-spawns: 1
+  ambient-spawns: 1
+  axolotl-spawns: 1
+  autosave: 6000

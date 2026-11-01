@@ -10,6 +10,7 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.InventoryItem
 import com.example.data.model.LogCategory
 import com.example.data.model.LogLevel
+import com.example.data.model.Position3D
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +39,7 @@ class MindcraftBotEngine(
     private var botLoopJob: Job? = null
     private var telemetryJob: Job? = null
     private var chatListenerJob: Job? = null
+    private var reconnectJob: Job? = null
     private var uptimeSeconds = 0L
 
     fun startBot(
@@ -70,7 +72,7 @@ class MindcraftBotEngine(
             var detectedIsSnapshot = cached?.isSnapshot ?: false
             val isLocalHost = cleanHost in listOf("localhost", "127.0.0.1", "10.0.2.2")
 
-            // Only ping if NOT in directJoin mode and protocol is unknown
+            // Bypass ping if in directJoin mode OR if protocol is already known/cached
             if (!directJoin && detectedProtocol <= 0) {
                 log(LogLevel.INFO, LogCategory.NETWORK, "Pinging server at $cleanHost:$effectivePort...")
                 val statusResult = protocolClient.queryServerStatus(cleanHost, effectivePort)
@@ -104,19 +106,21 @@ class MindcraftBotEngine(
                         "Server ping check: ${statusResult.error ?: "Server did not respond to ping"}. Attempting direct connection..."
                     )
                 }
+            } else if (detectedProtocol > 0) {
+                log(LogLevel.INFO, LogCategory.NETWORK, "Using cached protocol $detectedProtocol ($detectedVersionName) - skipping status ping to avoid server throttle.")
             }
 
-            // Paper/Purpur/Spigot & Aternos enforce connection-throttle (typically 4000ms).
-            // Prevent kicks by ensuring at least 4.5s have passed since the ping socket closed.
+            // Bukkit/Spigot/Paper/Purpur & Aternos enforce connection-throttle (typically 4000-5000ms).
+            // Prevent kicks by ensuring at least 5s have passed since the last socket contact.
             val lastContact = protocolClient.getLastContactTimestamp(cleanHost, effectivePort)
             val elapsed = System.currentTimeMillis() - lastContact
-            if (!isLocalHost && elapsed < 4500) {
-                val remainingMs = 4500 - elapsed
+            if (!isLocalHost && lastContact > 0 && elapsed < 5000) {
+                val remainingMs = 5000 - elapsed
                 val waitSeconds = ((remainingMs + 999) / 1000).toInt().coerceAtLeast(1)
                 log(
                     LogLevel.INFO,
                     LogCategory.NETWORK,
-                    "Detected $detectedVersionName. Allowing ${waitSeconds}s for server throttle cooldown before joining..."
+                    "Cooldown guard: Waiting ${waitSeconds}s for server throttle cooldown before joining..."
                 )
                 for (s in waitSeconds downTo 1) {
                     _botState.value = _botState.value.copy(
@@ -144,20 +148,20 @@ class MindcraftBotEngine(
                 scope = coroutineScope
             )
 
-            // Auto-recovery for server connection throttling
+            // Auto-recovery for server connection throttling (Aternos, Spigot, Paper)
             var throttleRetries = 0
-            while (!connectResult.isSuccess && isThrottleError(connectResult.message) && throttleRetries < 2) {
+            while (!connectResult.isSuccess && isThrottleError(connectResult.message) && throttleRetries < 4) {
                 throttleRetries++
-                val waitSecs = 5
+                val waitSecs = 6
                 log(
                     LogLevel.WARN,
                     LogCategory.NETWORK,
-                    "Server connection throttled. Anti-spam timer active. Reconnecting automatically in ${waitSecs}s..."
+                    "Server connection throttled (attempt $throttleRetries/4). Anti-spam timer active. Reconnecting in ${waitSecs}s..."
                 )
                 for (s in waitSecs downTo 1) {
                     _botState.value = _botState.value.copy(
                         status = BotStatus.CONNECTING,
-                        activeTask = "Server throttled: Retrying in ${s}s...",
+                        activeTask = "Server throttled: Retrying in ${s}s ($throttleRetries/4)...",
                         currentGoal = "Connection throttled - Cooling down ($s s)..."
                     )
                     delay(1000L)
@@ -194,6 +198,12 @@ class MindcraftBotEngine(
                         ChatMessage(sender = "System", message = "Connected to $cleanHost:$effectivePort as $cleanBotName (${connectResult.versionName}$finalSnapshotLabel)")
                     )
                 )
+
+                // Greet players in server chat
+                coroutineScope.launch(Dispatchers.IO) {
+                    delay(1200)
+                    protocolClient.sendChatMessage("Mindcraft AI Bot online! Type !help or chat with me.")
+                }
 
                 startChatListener(aiSettings)
                 startLoops(aiSettings)
@@ -234,15 +244,85 @@ class MindcraftBotEngine(
     private fun startChatListener(aiSettings: AiSettings) {
         chatListenerJob?.cancel()
         chatListenerJob = coroutineScope.launch(Dispatchers.IO) {
+            // Collect spawn position updates from server
+            launch {
+                protocolClient.spawnPosition.collect { (x, y, z) ->
+                    val pos = Position3D(x = x, y = y, z = z)
+                    _botState.value = _botState.value.copy(
+                        position = pos,
+                        activeTask = "In-game at (${x.toInt()}, ${y.toInt()}, ${z.toInt()})"
+                    )
+                    log(LogLevel.SUCCESS, LogCategory.PERCEPTION, "Spawned in world at (${x.toInt()}, ${y.toInt()}, ${z.toInt()})")
+                }
+            }
+
+            // Collect TCP disconnect events for instantaneous self-healing
+            launch {
+                protocolClient.disconnectEvent.collect { reason ->
+                    if (_botState.value.status == BotStatus.ONLINE) {
+                        _botState.value = _botState.value.copy(
+                            isRealTcpConnected = false,
+                            activeTask = "TCP connection lost"
+                        )
+                        log(LogLevel.WARN, LogCategory.NETWORK, "TCP connection dropped by server: $reason")
+                        if (_botState.value.isAutoRecoveryEnabled) {
+                            triggerAutoReconnect(reason, aiSettings)
+                        }
+                    }
+                }
+            }
+
             protocolClient.chatMessages.collect { (sender, message) ->
-                val chatMsg = ChatMessage(sender = sender, message = message, isBot = false)
+                val isSelf = sender.equals(_botState.value.botName, ignoreCase = true) || sender.equals("MindcraftBot", ignoreCase = true)
+                val chatMsg = ChatMessage(sender = sender, message = message, isBot = isSelf)
                 val updatedChats = _botState.value.chatHistory + chatMsg
                 _botState.value = _botState.value.copy(chatHistory = updatedChats.takeLast(50))
 
                 log(LogLevel.INFO, LogCategory.CHAT, "<$sender> $message")
 
-                if (_botState.value.isAiAutopilotEnabled && sender != _botState.value.botName) {
-                    executeNaturalLanguageCommand(message, aiSettings)
+                if (isSelf) return@collect
+
+                val cleanMsg = message.trim()
+                when {
+                    cleanMsg.equals("!help", ignoreCase = true) -> {
+                        protocolClient.sendChatMessage("[Mindcraft] Commands: !help, !coords, !status, !mine <block>, !craft <item>, or speak naturally!")
+                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !help to $sender")
+                    }
+                    cleanMsg.equals("!coords", ignoreCase = true) || cleanMsg.equals("!pos", ignoreCase = true) -> {
+                        val pos = _botState.value.position
+                        protocolClient.sendChatMessage("[Mindcraft] Bot position: X=${pos.x.toInt()}, Y=${pos.y.toInt()}, Z=${pos.z.toInt()}")
+                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !coords to $sender")
+                    }
+                    cleanMsg.equals("!status", ignoreCase = true) -> {
+                        val s = _botState.value
+                        protocolClient.sendChatMessage("[Mindcraft] Health: ${s.health}/20, Food: ${s.food}/20, Task: ${s.activeTask}")
+                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !status to $sender")
+                    }
+                    cleanMsg.startsWith("!mine", ignoreCase = true) -> {
+                        val block = cleanMsg.removePrefix("!mine").trim().ifBlank { "iron_ore" }
+                        _botState.value = _botState.value.copy(activeTask = "Mining $block")
+                        addItemToInventory(block, 8)
+                        protocolClient.sendChatMessage("[Mindcraft] Started mining $block.")
+                        log(LogLevel.SUCCESS, LogCategory.ACTION, "$sender commanded mining $block")
+                    }
+                    cleanMsg.startsWith("!craft", ignoreCase = true) -> {
+                        val item = cleanMsg.removePrefix("!craft").trim().ifBlank { "torch" }
+                        _botState.value = _botState.value.copy(activeTask = "Crafting $item")
+                        addItemToInventory(item, 4)
+                        protocolClient.sendChatMessage("[Mindcraft] Crafted $item.")
+                        log(LogLevel.SUCCESS, LogCategory.ACTION, "$sender commanded crafting $item")
+                    }
+                    cleanMsg.equals("!stop", ignoreCase = true) -> {
+                        _botState.value = _botState.value.copy(activeTask = "Standing by")
+                        protocolClient.sendChatMessage("[Mindcraft] Tasks halted. Standing by.")
+                        log(LogLevel.INFO, LogCategory.ACTION, "$sender requested stop")
+                    }
+                    else -> {
+                        // Natural language AI conversation
+                        if (_botState.value.isAiAutopilotEnabled) {
+                            executeNaturalLanguageCommand(message, aiSettings)
+                        }
+                    }
                 }
             }
         }
@@ -252,9 +332,11 @@ class MindcraftBotEngine(
         botLoopJob?.cancel()
         telemetryJob?.cancel()
         chatListenerJob?.cancel()
+        reconnectJob?.cancel()
         botLoopJob = null
         telemetryJob = null
         chatListenerJob = null
+        reconnectJob = null
 
         protocolClient.disconnect()
 
@@ -425,18 +507,80 @@ class MindcraftBotEngine(
 
         botLoopJob = coroutineScope.launch(Dispatchers.IO) {
             while (isActive) {
-                delay(15000)
+                delay(10000)
                 if (_botState.value.status != BotStatus.ONLINE) continue
 
                 if (_botState.value.isRealTcpConnected && !protocolClient.isCurrentlyConnected()) {
-                    log(LogLevel.WARN, LogCategory.NETWORK, "TCP connection lost. Attempting auto-reconnect...")
-                    protocolClient.connect(
-                        rawHost = _botState.value.serverHost,
-                        rawPort = _botState.value.serverPort,
-                        username = _botState.value.botName,
-                        scope = coroutineScope
-                    )
+                    log(LogLevel.WARN, LogCategory.NETWORK, "Watchdog detected disconnected TCP socket. Initiating auto-reconnect...")
+                    if (_botState.value.isAutoRecoveryEnabled) {
+                        triggerAutoReconnect("TCP socket disconnected", aiSettings)
+                    }
                 }
+            }
+        }
+    }
+
+    private fun triggerAutoReconnect(reason: String, aiSettings: AiSettings) {
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = coroutineScope.launch(Dispatchers.IO) {
+            val state = _botState.value
+            val host = state.serverHost
+            val port = state.serverPort
+            val name = state.botName
+            if (host.isBlank() || port <= 0) return@launch
+
+            _botState.value = _botState.value.copy(
+                status = BotStatus.CONNECTING,
+                isRealTcpConnected = false
+            )
+
+            val waitSecs = 6
+            log(LogLevel.WARN, LogCategory.ERROR_WATCHDOG, "Watchdog: TCP connection lost ($reason). Waiting ${waitSecs}s throttle cooldown...")
+            for (s in waitSecs downTo 1) {
+                _botState.value = _botState.value.copy(
+                    activeTask = "Cooldown: Reconnecting in ${s}s...",
+                    currentGoal = "TCP disconnected ($reason) - Retrying in ${s}s..."
+                )
+                delay(1000L)
+            }
+
+            log(LogLevel.INFO, LogCategory.NETWORK, "Watchdog: Reconnecting TCP socket to $host:$port as '$name'...")
+            val result = protocolClient.connect(
+                rawHost = host,
+                rawPort = port,
+                username = name,
+                protocolVersionOverride = if (state.autoDetectVersion) null else state.manualProtocolOverride,
+                knownVersionName = state.serverVersion,
+                knownIsSnapshot = state.isSnapshot,
+                scope = coroutineScope
+            )
+
+            if (result.isSuccess) {
+                log(LogLevel.SUCCESS, LogCategory.NETWORK, "Watchdog: Reconnected successfully to ${result.versionName}!")
+                _botState.value = _botState.value.copy(
+                    status = BotStatus.ONLINE,
+                    isRealTcpConnected = true,
+                    currentGoal = "Reconnected to server.",
+                    activeTask = "In-game session restored"
+                )
+                delay(1000L)
+                protocolClient.sendChatMessage("[Mindcraft] Bot reconnected.")
+                startChatListener(aiSettings)
+                startLoops(aiSettings)
+            } else {
+                log(LogLevel.ERROR, LogCategory.NETWORK, "Watchdog: Auto-reconnect failed (${result.message}).")
+                handleEngineError(
+                    errorType = "TcpConnectionLostException",
+                    message = "TCP connection lost: ${result.message}",
+                    exception = result.exception ?: Exception(result.message),
+                    recoveryAction = "TCP dropped. Verify 'connection-throttle: 0' in bukkit.yml and 'timeout-time: 120' in spigot.yml."
+                )
+                _botState.value = _botState.value.copy(
+                    status = BotStatus.ERROR,
+                    isRealTcpConnected = false,
+                    currentGoal = "Auto-reconnect failed: ${result.message}",
+                    activeTask = "Connection failed"
+                )
             }
         }
     }
@@ -549,8 +693,12 @@ class MindcraftBotEngine(
     private fun isThrottleError(message: String): Boolean {
         val lower = message.lowercase()
         return lower.contains("throttled") ||
+                lower.contains("throttle") ||
                 lower.contains("wait before reconnecting") ||
                 lower.contains("reconnect too fast") ||
-                lower.contains("connection throttle")
+                lower.contains("connection throttle") ||
+                lower.contains("slow down") ||
+                lower.contains("too fast") ||
+                lower.contains("rate limit")
     }
 }
