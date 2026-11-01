@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Isometric Mindcraft Block - Outer Shadow/Glow -->
+    <path
+        android:fillColor="#0284C7"
+        android:fillAlpha="0.3"
+        android:pathData="M54,23 L82,39 L82,71 L54,85 L26,71 L26,39 Z" />
+
+    <!-- Top Isometric Face: AI Neural Emerald Circuit Turf -->
+    <path
+        android:fillColor="#059669"
+        android:pathData="M54,25 L80,40 L54,54 L28,40 Z" />
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M54,27 L77,40 L54,52 L31,40 Z" />
+
+    <!-- Top Face: Neural Circuit Traces & Mindcraft 'M' Node Web -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#A7F3D0"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:pathData="M38,38 L46,44 L54,36 L62,44 L70,38" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#6EE7B7"
+        android:strokeWidth="1"
+        android:pathData="M54,36 L54,48 M46,44 L46,48 M62,44 L62,48" />
+
+    <!-- Glowing Synapse Nodes (Top Face) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M53,35 h2 v2 h-2 z M37,37 h2 v2 h-2 z M69,37 h2 v2 h-2 z M45,43 h2 v2 h-2 z M61,43 h2 v2 h-2 z M53,47 h2 v2 h-2 z" />
+
+    <!-- Left Face: Deep Voxel Obsidian Slate -->
+    <path
+        android:fillColor="#0F172A"
+        android:pathData="M28,40 L54,54 L54,83 L28,69 Z" />
+
+    <!-- Left Face: Minecraft Voxel Shading Layers -->
+    <path
+        android:fillColor="#1E293B"
+        android:pathData="M32,45 L50,55 L50,77 L32,67 Z" />
+
+    <!-- Left Eye / AI Robot Visor -->
+    <path
+        android:fillColor="#0284C7"
+        android:pathData="M34,53 L44,58 L44,65 L34,60 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M36,54.5 L42,57.5 L42,63.5 L36,60.5 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,56.5 L40,57.5 L40,61.5 L38,60.5 Z" />
+
+    <!-- Right Face: Deep Cobalt Steel Face -->
+    <path
+        android:fillColor="#1E293B"
+        android:pathData="M54,54 L80,40 L80,69 L54,83 Z" />
+
+    <!-- Right Face: Voxel Plate Inset -->
+    <path
+        android:fillColor="#334155"
+        android:pathData="M58,55 L76,45 L76,67 L58,77 Z" />
+
+    <!-- Right Eye / AI Robot Visor -->
+    <path
+        android:fillColor="#0284C7"
+        android:pathData="M64,58 L74,53 L74,60 L64,65 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M66,57.5 L72,54.5 L72,60.5 L66,63.5 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M68,57.5 L70,56.5 L70,60.5 L68,61.5 Z" />
+
+    <!-- Center Spine & Front Voxel Seam (Glowing Diamond Azure) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="1.5"
+        android:pathData="M54,54 L54,83" />
+
+    <!-- Mindcraft Digital Heart / AI Core Indicator -->
+    <path
+        android:fillColor="#06B6D4"
+        android:pathData="M52,70 L56,68 L56,74 L52,76 Z" />
+    <path
+        android:fillColor="#E0F2FE"
+        android:pathData="M53,71.5 L55,70.5 L55,73.5 L53,74.5 Z" />
+
+</vector>

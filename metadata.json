@@ -1,0 +1,6 @@
+{
+  "name": "Mindcraft",
+  "description": "Host and command autonomous Minecraft AI bots with local and cloud models, performance dashboard, and auto-error recovery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
