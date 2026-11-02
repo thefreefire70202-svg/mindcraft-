@@ -1,7 +1,10 @@
 name: Build Mindcraft APK
 
 on:
-  # Run validation only when explicitly requested; routine source commits do not start tests.
+  # Build and validate only when requested on the repair branch, or manually.
+  push:
+    branches:
+      - fix/first-stage-no-fake-success
   workflow_dispatch:
 
 concurrency:
