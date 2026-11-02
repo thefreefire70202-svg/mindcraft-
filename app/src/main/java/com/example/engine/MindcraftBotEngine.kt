@@ -301,36 +301,32 @@ class MindcraftBotEngine(
                 val cleanMsg = message.trim()
                 when {
                     cleanMsg.equals("!help", ignoreCase = true) -> {
-                        protocolClient.sendChatMessage("[Mindcraft] Available: !help, !coords, !status, !stop, or speak naturally. Mining and crafting are unsupported.")
-                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !help to $sender")
+                        sendChatReply("[Mindcraft] Available: !help, !coords, !status, !stop, or speak naturally. Mining and crafting are unsupported.", "Help reply")
                     }
                     cleanMsg.equals("!coords", ignoreCase = true) || cleanMsg.equals("!pos", ignoreCase = true) -> {
                         val state = _botState.value
                         if (state.hasPositionUpdate) {
                             val pos = state.position
-                            protocolClient.sendChatMessage("[Mindcraft] Position: X=${pos.x.toInt()}, Y=${pos.y.toInt()}, Z=${pos.z.toInt()}")
-                            log(LogLevel.INFO, LogCategory.CHAT, "Replied to !coords using the latest server position packet.")
+                            sendChatReply("[Mindcraft] Position: X=${pos.x.toInt()}, Y=${pos.y.toInt()}, Z=${pos.z.toInt()}", "Position reply")
                         } else {
-                            protocolClient.sendChatMessage("[Mindcraft] Position is unavailable; the server has not supplied a position packet.")
-                            log(LogLevel.WARN, LogCategory.CHAT, "Could not answer !coords because no position packet has been received.")
+                            sendChatReply("[Mindcraft] Position is unavailable; the server has not supplied a position packet.", "Unavailable position reply")
                         }
                     }
                     cleanMsg.equals("!status", ignoreCase = true) -> {
                         val s = _botState.value
-                        protocolClient.sendChatMessage("[Mindcraft] Connection: ${s.status}. Live health and food readings are not available yet.")
-                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !status to $sender")
+                        sendChatReply("[Mindcraft] Connection: ${s.status}. Health, food and inventory are unavailable because those server packets are not decoded yet.", "Status reply")
                     }
                     cleanMsg.startsWith("!mine", ignoreCase = true) -> {
-                        protocolClient.sendChatMessage("[Mindcraft] Mining is not implemented yet. No inventory was changed.")
+                        sendChatReply("[Mindcraft] Mining is unsupported; no mining action was performed.", "Unsupported mining reply")
                         log(LogLevel.WARN, LogCategory.ACTION, "$sender requested mining, but no real mining action is available.")
                     }
                     cleanMsg.startsWith("!craft", ignoreCase = true) -> {
-                        protocolClient.sendChatMessage("[Mindcraft] Crafting is not implemented yet. No inventory was changed.")
+                        sendChatReply("[Mindcraft] Crafting is unsupported; no crafting action was performed.", "Unsupported crafting reply")
                         log(LogLevel.WARN, LogCategory.ACTION, "$sender requested crafting, but no real crafting action is available.")
                     }
                     cleanMsg.equals("!stop", ignoreCase = true) -> {
                         _botState.value = _botState.value.copy(activeTask = "Standing by")
-                        protocolClient.sendChatMessage("[Mindcraft] Tasks halted. Standing by.")
+                        sendChatReply("[Mindcraft] Automation paused. No gameplay action was performed.", "Stop reply")
                         log(LogLevel.INFO, LogCategory.ACTION, "$sender requested stop")
                     }
                     else -> {
@@ -476,6 +472,16 @@ class MindcraftBotEngine(
         )
     }
 
+    private suspend fun sendChatReply(message: String, context: String) {
+        val written = protocolClient.sendChatMessage(message)
+        log(
+            if (written) LogLevel.INFO else LogLevel.WARN,
+            LogCategory.CHAT,
+            if (written) "$context packet written to the local TCP socket; server-side delivery is not confirmed."
+            else "$context packet was not written to the local TCP socket."
+        )
+    }
+
     private fun startLoops(aiSettings: AiSettings) {
         uptimeSeconds = 0L
 
@@ -552,7 +558,7 @@ class MindcraftBotEngine(
                     activeTask = "In-game session restored"
                 )
                 delay(1000L)
-                protocolClient.sendChatMessage("[Mindcraft] Bot reconnected.")
+                sendChatReply("[Mindcraft] Bot connection restored.", "Reconnect reply")
                 startChatListener(aiSettings)
                 startLoops(aiSettings)
             } else {
