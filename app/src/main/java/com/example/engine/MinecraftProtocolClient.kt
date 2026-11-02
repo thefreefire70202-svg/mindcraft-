@@ -421,13 +421,18 @@ class MinecraftProtocolClient {
             val status = queryServerStatus(host, port, timeoutMs.coerceAtLeast(7500))
             if (!status.isOnline || status.protocolVersion <= 0) {
                 setConnectionState(ProtocolState.ERROR)
+                val bedrockPortHint = when (port) {
+                    19132, 19133 -> " Port $port is commonly used by Minecraft Bedrock Edition (UDP). This app currently implements Minecraft Java Edition over TCP, so it cannot join a Bedrock server. Use the server's Java Edition address and Java port, or a Java-to-Bedrock proxy that exposes a Java TCP endpoint."
+                    else -> ""
+                }
+                val statusReason = status.error ?: "The server did not provide a valid Java Edition status response."
                 return@withContext ConnectResult(
                     isSuccess = false,
-                    message = "Server protocol could not be detected. Select a Minecraft version manually or make the server status endpoint reachable. No login packet was sent.",
+                    message = "Java Edition server detection failed: $statusReason$bedrockPortHint No login packet was sent. If this is a Java server, verify that its Java TCP port is open and select its exact protocol version only if you know it.",
                     protocolVersionUsed = 0,
                     versionName = "Unknown",
                     isSnapshot = false,
-                    exception = IllegalStateException(status.error ?: "Server did not provide a valid protocol version.")
+                    exception = IllegalStateException(statusReason)
                 )
             }
             detectedProtocol = status.protocolVersion
