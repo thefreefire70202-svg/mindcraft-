@@ -264,12 +264,21 @@ class AiClient(
 
             if (response.isSuccessful) {
                 val json = JSONObject(body)
-                val rawText = if (json.has("choices")) {
-                    json.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
-                } else if (json.has("candidates")) {
-                    json.getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
-                } else {
-                    body
+                val rawText = when {
+                    json.has("choices") -> json.getJSONArray("choices")
+                        .getJSONObject(0).getJSONObject("message").getString("content")
+                    json.has("candidates") -> json.getJSONArray("candidates")
+                        .getJSONObject(0).getJSONObject("content").getJSONArray("parts")
+                        .getJSONObject(0).getString("text")
+                    else -> return AiResponse(
+                        thoughtProcess = "Provider returned an unsupported response format.",
+                        commands = emptyList(),
+                        chatMessage = "",
+                        latencyMs = latency,
+                        providerUsed = providerName,
+                        isSuccess = false,
+                        errorMessage = "HTTP request succeeded, but the response did not contain a supported chat completion field."
+                    )
                 }
                 return parseMindcraftOutput(rawText, latency, providerName)
             } else {
