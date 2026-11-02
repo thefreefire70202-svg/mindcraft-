@@ -103,6 +103,7 @@ private data class ProtocolPacketIds(
     val playPlayerChat: Int,
     val playPosition: Int,
     val playSystemChat: Int,
+    val playBlockUpdate: Int,
     val playDisconnect: Int,
     val playStartConfiguration: Int,
     val playConfigurationAcknowledged: Int,
@@ -148,6 +149,7 @@ private object ProtocolPacketRegistry {
             playPlayerChat = 0x39,
             playPosition = 0x40,
             playSystemChat = 0x6C,
+            playBlockUpdate = 0x09,
             playDisconnect = 0x1D,
             playStartConfiguration = 0x69,
             playConfigurationAcknowledged = 0x0C,
@@ -203,6 +205,13 @@ class MinecraftProtocolClient {
 
     private val _protocolEvents = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val protocolEvents: SharedFlow<String> = _protocolEvents.asSharedFlow()
+
+    private val confirmedBlockStates = ConfirmedBlockStateStore()
+    private val _blockUpdates = MutableSharedFlow<ServerBlockUpdate>(extraBufferCapacity = 128)
+    /** Individual block states received from the server; this is not a full chunk snapshot. */
+    val blockUpdates: SharedFlow<ServerBlockUpdate> = _blockUpdates.asSharedFlow()
+
+    fun confirmedBlockStateId(position: BlockPos): Int? = confirmedBlockStates.stateIdAt(position)
 
     companion object {
         private const val MAX_PACKET_SIZE = 2 * 1024 * 1024
@@ -872,6 +881,11 @@ class MinecraftProtocolClient {
             }
             ids.playSystemChat -> {
                 _protocolEvents.tryEmit("Received system-chat packet; NBT text-component decoding is unsupported.")
+            }
+            ids.playBlockUpdate -> {
+                val update = Protocol767BlockUpdateDecoder.decode(payload)
+                confirmedBlockStates.apply(update)
+                _blockUpdates.tryEmit(update)
             }
             else -> _protocolEvents.tryEmit("Received unhandled protocol 767 play packet id 0x${packetId.toString(16)}.")
         }
