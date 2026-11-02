@@ -76,6 +76,7 @@ data class BotState(
     val onlinePlayersCount: Int = 0,
     val maxPlayersCount: Int = 0,
     val isRealTcpConnected: Boolean = false,
+    val protocolState: String = "DISCONNECTED",
     val health: Int = -1,
     val maxHealth: Int = 20,
     val food: Int = -1,
