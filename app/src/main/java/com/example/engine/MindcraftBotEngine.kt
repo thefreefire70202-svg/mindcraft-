@@ -299,18 +299,12 @@ class MindcraftBotEngine(
                         log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !status to $sender")
                     }
                     cleanMsg.startsWith("!mine", ignoreCase = true) -> {
-                        val block = cleanMsg.removePrefix("!mine").trim().ifBlank { "iron_ore" }
-                        _botState.value = _botState.value.copy(activeTask = "Mining $block")
-                        addItemToInventory(block, 8)
-                        protocolClient.sendChatMessage("[Mindcraft] Started mining $block.")
-                        log(LogLevel.SUCCESS, LogCategory.ACTION, "$sender commanded mining $block")
+                        protocolClient.sendChatMessage("[Mindcraft] Mining is not implemented yet. No inventory was changed.")
+                        log(LogLevel.WARN, LogCategory.ACTION, "$sender requested mining, but no real mining action is available.")
                     }
                     cleanMsg.startsWith("!craft", ignoreCase = true) -> {
-                        val item = cleanMsg.removePrefix("!craft").trim().ifBlank { "torch" }
-                        _botState.value = _botState.value.copy(activeTask = "Crafting $item")
-                        addItemToInventory(item, 4)
-                        protocolClient.sendChatMessage("[Mindcraft] Crafted $item.")
-                        log(LogLevel.SUCCESS, LogCategory.ACTION, "$sender commanded crafting $item")
+                        protocolClient.sendChatMessage("[Mindcraft] Crafting is not implemented yet. No inventory was changed.")
+                        log(LogLevel.WARN, LogCategory.ACTION, "$sender requested crafting, but no real crafting action is available.")
                     }
                     cleanMsg.equals("!stop", ignoreCase = true) -> {
                         _botState.value = _botState.value.copy(activeTask = "Standing by")
@@ -418,15 +412,14 @@ class MindcraftBotEngine(
                     }
                 }
 
-                for (command in aiResponse.commands) {
-                    executeParsedCommand(command)
-                    delay(700)
+                if (aiResponse.commands.isNotEmpty()) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "AI proposed " + aiResponse.commands.size + " game command(s), but command execution is disabled until real protocol actions are implemented.")
                 }
 
                 _botState.value = _botState.value.copy(
                     telemetry = _botState.value.telemetry.copy(
                         aiQueriesMade = _botState.value.telemetry.aiQueriesMade + 1,
-                        actionsExecuted = _botState.value.telemetry.actionsExecuted + aiResponse.commands.size
+                        actionsExecuted = _botState.value.telemetry.actionsExecuted
                     )
                 )
             } else {
@@ -440,52 +433,11 @@ class MindcraftBotEngine(
     }
 
     private suspend fun executeParsedCommand(command: String) {
-        val trimmed = command.trim()
-        val current = _botState.value
-
-        when {
-            trimmed.startsWith("!goTo") -> {
-                val dx = Random.nextDouble(-3.0, 3.0)
-                val dz = Random.nextDouble(-3.0, 3.0)
-                val newPos = current.position.copy(
-                    x = (current.position.x + dx * 8).coerceIn(-1000.0, 1000.0),
-                    z = (current.position.z + dz * 8).coerceIn(-1000.0, 1000.0)
-                )
-                _botState.value = current.copy(
-                    position = newPos,
-                    activeTask = "Moving to (${newPos.x.toInt()}, ${newPos.y.toInt()}, ${newPos.z.toInt()})"
-                )
-                log(LogLevel.INFO, LogCategory.ACTION, "Navigating to (${newPos.x.toInt()}, ${newPos.y.toInt()}, ${newPos.z.toInt()})")
-            }
-            trimmed.startsWith("!mine") -> {
-                val blockName = trimmed.substringAfter("(").substringBefore(",").substringBefore(")").trim()
-                val count = trimmed.substringAfter(",").substringBefore(")").trim().toIntOrNull() ?: 1
-                _botState.value = current.copy(activeTask = "Mining $count $blockName")
-                log(LogLevel.SUCCESS, LogCategory.ACTION, "Mined $count $blockName.")
-                addItemToInventory(blockName, count)
-            }
-            trimmed.startsWith("!craft") -> {
-                val item = trimmed.substringAfter("(").substringBefore(",").substringBefore(")").trim()
-                _botState.value = current.copy(activeTask = "Crafting $item")
-                log(LogLevel.SUCCESS, LogCategory.ACTION, "Crafted $item.")
-                addItemToInventory(item, 1)
-            }
-            trimmed.startsWith("!defendFrom") || trimmed.startsWith("!attack") -> {
-                val target = trimmed.substringAfter("(").substringBefore(")").trim()
-                _botState.value = current.copy(activeTask = "Defending against $target")
-                log(LogLevel.WARN, LogCategory.COMBAT, "Engaged $target with sword.")
-            }
-            trimmed.startsWith("!eat") -> {
-                val foodItem = trimmed.substringAfter("(").substringBefore(")").trim()
-                val newFood = minOf(20, current.food + 4)
-                val newHealth = minOf(20, current.health + 2)
-                _botState.value = current.copy(food = newFood, health = newHealth, activeTask = "Eating $foodItem")
-                log(LogLevel.SUCCESS, LogCategory.ACTION, "Ate $foodItem. Food: $newFood/20, Health: $newHealth/20.")
-            }
-            else -> {
-                log(LogLevel.INFO, LogCategory.ACTION, "Action: $trimmed")
-            }
-        }
+        log(
+            LogLevel.WARN,
+            LogCategory.ACTION,
+            "Ignored unsupported game command '$command'. No Minecraft action was executed."
+        )
     }
 
     private fun startLoops(aiSettings: AiSettings) {
@@ -644,7 +596,7 @@ class MindcraftBotEngine(
         Inventory: [$invSummary]
         User Instruction: "$userGoal"
 
-        Output your reasoning thoughts, followed by commands (e.g. !goTo, !mine, !craft, !defendFrom, !eat).
+        Return a concise response for the user. Do not claim to perform Minecraft actions; game-action execution is currently disabled.
         """.trimIndent()
     }
 
