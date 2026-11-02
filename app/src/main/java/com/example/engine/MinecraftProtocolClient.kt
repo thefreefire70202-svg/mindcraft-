@@ -285,6 +285,9 @@ class MinecraftProtocolClient {
                 // 3. Read Status Response Packet
                 val packetLength = readVarInt(inStream)
                 val packetId = readVarInt(inStream)
+                if (packetId != 0x00) {
+                    throw IllegalStateException("Unexpected server status packet ID: $packetId")
+                }
                 val jsonResponse = readString(inStream)
 
                 val ping = System.currentTimeMillis() - startTime
@@ -414,6 +417,7 @@ class MinecraftProtocolClient {
 
         val packetIds = ProtocolPacketRegistry.forProtocol(detectedProtocol)
         if (packetIds == null) {
+            setConnectionState(ProtocolState.ERROR)
             return@withContext ConnectResult(
                 isSuccess = false,
                 message = "Minecraft protocol $detectedProtocol ($detectedName) is not supported by this build. Only protocol 767 has a packet registry; no login packet was sent.",
@@ -543,6 +547,7 @@ class MinecraftProtocolClient {
                         val rawReason = readString(reasonStream)
                         val cleanReason = parseDisconnectReason(rawReason)
                         disconnect()
+                        setConnectionState(ProtocolState.ERROR)
                         loginResult = ConnectResult(
                             isSuccess = false,
                             message = cleanReason,
@@ -556,6 +561,7 @@ class MinecraftProtocolClient {
                     packetIds.loginEncryptionRequest -> {
                         // Encryption Request (Server requires premium Mojang auth / online-mode=true)
                         disconnect()
+                        setConnectionState(ProtocolState.ERROR)
                         loginResult = ConnectResult(
                             isSuccess = false,
                             isOnlineModeRestricted = true,
@@ -597,27 +603,25 @@ class MinecraftProtocolClient {
                     }
                     packetIds.loginPluginRequest -> {
                         // Login Plugin Request (Custom Query) -> Answer Login Plugin Response (Packet 0x02, messageId, successful = false)
-                        try {
-                            val queryStream = ByteArrayInputStream(payload)
-                            val messageId = readVarInt(queryStream)
-                            val reply = ByteArrayOutputStream()
-                            writeVarInt(reply, packetIds.loginPluginResponse) // Serverbound Login Plugin Response
-                            writeVarInt(reply, messageId)
-                            reply.write(0) // successful = false
-                            sendProtocolPacket(reply.toByteArray())
-                        } catch (_: Exception) {}
+                        val queryStream = ByteArrayInputStream(payload)
+                        val messageId = readVarInt(queryStream)
+                        val channel = readString(queryStream)
+                        _protocolEvents.tryEmit("Login plugin request '$channel' was declined because plugin authentication is unsupported.")
+                        val reply = ByteArrayOutputStream()
+                        writeVarInt(reply, packetIds.loginPluginResponse)
+                        writeVarInt(reply, messageId)
+                        reply.write(0)
+                        sendProtocolPacket(reply.toByteArray())
                     }
                     packetIds.loginCookieRequest -> {
                         // Cookie Request (1.20.5+) -> Answer Cookie Response (Packet 0x04, key, hasPayload = false)
-                        try {
-                            val cookieStream = ByteArrayInputStream(payload)
-                            val key = readString(cookieStream)
-                            val reply = ByteArrayOutputStream()
-                            writeVarInt(reply, packetIds.loginCookieResponse) // Serverbound Cookie Response
-                            writeString(reply, key)
-                            reply.write(0) // hasPayload = false
-                            sendProtocolPacket(reply.toByteArray())
-                        } catch (_: Exception) {}
+                        val cookieStream = ByteArrayInputStream(payload)
+                        val key = readString(cookieStream)
+                        val reply = ByteArrayOutputStream()
+                        writeVarInt(reply, packetIds.loginCookieResponse)
+                        writeString(reply, key)
+                        reply.write(0)
+                        sendProtocolPacket(reply.toByteArray())
                     }
                     else -> {}
                 }
@@ -872,6 +876,7 @@ class MinecraftProtocolClient {
             sendProtocolPacket(bytes.toByteArray())
             true
         } catch (e: Exception) {
+            _protocolEvents.tryEmit("Chat write failed: ${e.message ?: e.javaClass.simpleName}")
             false
         }
     }
