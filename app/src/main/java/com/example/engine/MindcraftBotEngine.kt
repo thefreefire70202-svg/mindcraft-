@@ -284,6 +284,7 @@ class MindcraftBotEngine(
             }
 
             protocolClient.connectionState.collect { phase ->
+                _botState.value = _botState.value.copy(protocolState = phase.name)
                 log(LogLevel.INFO, LogCategory.NETWORK, "Minecraft protocol state: $phase")
             }
 
