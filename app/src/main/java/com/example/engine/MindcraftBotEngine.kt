@@ -450,7 +450,7 @@ class MindcraftBotEngine(
                 }
 
                 if (aiResponse.commands.isNotEmpty()) {
-                    log(LogLevel.WARN, LogCategory.ACTION, "AI proposed " + aiResponse.commands.size + " game command(s), but command execution is disabled until real protocol actions are implemented.")
+                    aiResponse.commands.forEach { command -> executeParsedCommand(command) }
                 }
 
                 _botState.value = _botState.value.copy(
@@ -691,12 +691,17 @@ class MindcraftBotEngine(
 
         return """
         Minecraft Bot: ${state.botName}
-        Health and food: unavailable (the protocol client does not decode these game-state fields).
-        Position: unavailable until a position packet is decoded.
-        Inventory: unavailable until inventory packets are decoded.
+        Health and food: unavailable (not decoded yet).
+        Position: ${state.position.x}, ${state.position.y}, ${state.position.z} (server position packet, if received).
+        Inventory and nearby block state: unavailable (not decoded yet).
+        Available protocol-767 action commands:
+        - move <x> <y> <z>: sends one absolute position/rotation packet; this is not pathfinding and server acceptance is not confirmed.
+        - mine <x> <y> <z> [face]: sends start/finish dig packets only when a server position is known and the target is within reach.
+        - place <x> <y> <z> <face>: sends a use-item-on packet only when a server position is known and the target is within reach.
+        Do not invent coordinates, inventory, block state, or claim that an action succeeded. Only use actions when the user provided a target or the target is known from decoded world data.
         User Instruction: "$userGoal"
 
-        Return a concise response for the user. Do not claim to perform Minecraft actions; game-action execution is currently disabled.
+        Return a concise plan and supported action commands only. Clearly say when required world data is unavailable.
         """.trimIndent()
     }
 
