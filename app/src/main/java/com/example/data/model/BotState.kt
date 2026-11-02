@@ -45,18 +45,18 @@ data class InventoryItem(
 )
 
 data class Position3D(
-    val x: Double = 128.0,
-    val y: Double = 64.0,
-    val z: Double = -256.0,
+    val x: Double = 0.0,
+    val y: Double = 0.0,
+    val z: Double = 0.0,
     val yaw: Float = 0.0f,
     val pitch: Float = 0.0f
 )
 
 data class BotTelemetry(
     val pingMs: Int = 0,
-    val tps: Double = 20.0,
-    val cpuPercent: Int = 12,
-    val memoryMb: Int = 78,
+    val tps: Double = 0.0,
+    val cpuPercent: Int = 0,
+    val memoryMb: Int = 0,
     val uptimeSeconds: Long = 0,
     val actionsExecuted: Int = 0,
     val aiQueriesMade: Int = 0
@@ -67,21 +67,22 @@ data class BotState(
     val botName: String = "MindcraftBot",
     val serverHost: String = "localhost",
     val serverPort: Int = 25565,
-    val serverMotd: String = "A Minecraft Server",
+    val serverMotd: String = "",
     val serverVersion: String = "Auto-Detect",
     val detectedProtocolVersion: Int = 0,
     val isSnapshot: Boolean = false,
     val autoDetectVersion: Boolean = true,
     val manualProtocolOverride: Int = 0,
     val onlinePlayersCount: Int = 0,
-    val maxPlayersCount: Int = 20,
+    val maxPlayersCount: Int = 0,
     val isRealTcpConnected: Boolean = false,
-    val health: Int = 20,
+    val health: Int = -1,
     val maxHealth: Int = 20,
-    val food: Int = 20,
+    val food: Int = -1,
     val position: Position3D = Position3D(),
-    val dimension: String = "Overworld",
-    val biome: String = "Plains",
+    val hasPositionUpdate: Boolean = false,
+    val dimension: String = "",
+    val biome: String = "",
     val currentGoal: String = "Ready for instructions",
     val activeTask: String = "Idle",
     val inventory: List<InventoryItem> = emptyList(),
