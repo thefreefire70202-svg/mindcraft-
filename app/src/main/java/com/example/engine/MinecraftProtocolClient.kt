@@ -219,6 +219,10 @@ class MinecraftProtocolClient {
         /** Common default ports for Bedrock Dedicated Server; this is a hint, not proof of server edition. */
         fun isLikelyBedrockPort(port: Int): Boolean = port == 19132 || port == 19133
 
+        /** Auto mode may probe our implemented 1.21.1 client against any unimplemented advertised version. */
+        fun shouldAttemptProtocol767Compatibility(detectedProtocol: Int, protocolVersionOverride: Int?): Boolean =
+            protocolVersionOverride == null && detectedProtocol > 0 && detectedProtocol != 767
+
         fun parseHostAndPort(rawHost: String, defaultPort: Int = 25565): Pair<String, Int> {
             val clean = rawHost.trim()
             .removePrefix("http://")
@@ -448,9 +452,10 @@ class MinecraftProtocolClient {
 
         val packetIds = ProtocolPacketRegistry.forProtocol(detectedProtocol)
         if (packetIds == null) {
-            // A modern Java proxy may advertise its native server version while ViaVersion
-            // accepts older clients. Probe our one implemented protocol, never a fake registry.
-            if (protocolVersionOverride == null && detectedProtocol > 767) {
+            // Proxies can report either an older backend version (e.g. 340) or a newer
+            // frontend version (e.g. 777). In auto mode, probe the one real packet registry
+            // we implement. Never treat the advertised version as if we implemented it.
+            if (shouldAttemptProtocol767Compatibility(detectedProtocol, protocolVersionOverride)) {
                 val compatibility = performLoginHandshake(
                     host, port, username, 767,
                     "Java 1.21.1 (protocol 767 compatibility attempt; server advertised $detectedProtocol)",
@@ -461,7 +466,7 @@ class MinecraftProtocolClient {
                     currentVersionName = "Java 1.21.1 (compatibility via server proxy)"
                     _protocolEvents.tryEmit(
                         "Server advertised protocol $detectedProtocol; login succeeded using protocol 767. " +
-                            "Compatibility translation is being provided by the server/proxy."
+                            "The server/proxy accepted the 1.21.1 client protocol."
                     )
                     return@withContext compatibility.copy(
                         message = "Connected using protocol 767 compatibility. The server advertised protocol $detectedProtocol; a compatible proxy appears to be translating the connection."
@@ -469,9 +474,9 @@ class MinecraftProtocolClient {
                 }
                 setConnectionState(ProtocolState.ERROR)
                 return@withContext compatibility.copy(
-                    message = "Server advertises protocol $detectedProtocol ($detectedName), which this build does not implement. " +
+                    message = "Server status advertises protocol $detectedProtocol ($detectedName), which this build does not implement. " +
                         "An automatic Java 1.21.1/protocol 767 compatibility attempt was also rejected: " + compatibility.message +
-                        ". The server must allow older Java clients through ViaVersion or an equivalent proxy. " +
+                        ". The server must accept Java 1.21.1 clients through ViaVersion/ViaBackwards or an equivalent proxy. " +
                         "This app does not yet implement protocol $detectedProtocol."
                 )
             }
