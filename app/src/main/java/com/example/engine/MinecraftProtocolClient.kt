@@ -164,6 +164,7 @@ class MinecraftProtocolClient {
     private val _connectionState = kotlinx.coroutines.flow.MutableStateFlow(ProtocolState.DISCONNECTED)
     val connectionState: kotlinx.coroutines.flow.StateFlow<ProtocolState> = _connectionState.asStateFlow()
     private var packetListenerJob: Job? = null
+    private var lastPlayerPosition: Triple<Double, Double, Double>? = null
 
     private fun setConnectionState(state: ProtocolState) {
         currentState = state
@@ -788,7 +789,7 @@ class MinecraftProtocolClient {
                 val z = readDouble(stream)
                 val yaw = readFloat(stream)
                 val pitch = readFloat(stream)
-                stream.read() // relative flags
+                val flags = stream.read()
                 val teleportId = readVarInt(stream)
 
                 val confirm = ByteArrayOutputStream()
@@ -796,16 +797,17 @@ class MinecraftProtocolClient {
                 writeVarInt(confirm, teleportId)
                 sendProtocolPacket(confirm.toByteArray())
 
-                val position = ByteArrayOutputStream()
-                writeVarInt(position, ids.playPositionRotation)
-                writeDouble(position, x)
-                writeDouble(position, y)
-                writeDouble(position, z)
-                writeFloat(position, yaw)
-                writeFloat(position, pitch)
-                position.write(1)
-                sendProtocolPacket(position.toByteArray())
-                _spawnPosition.tryEmit(Triple(x, y, z))
+                val previous = lastPlayerPosition
+                if (flags and 0x07 != 0 && previous == null) {
+                    _protocolEvents.tryEmit("Relative teleport received before an absolute position; coordinates were not published.")
+                    return
+                }
+                val absoluteX = if (flags and 0x01 != 0) previous!!.first + x else x
+                val absoluteY = if (flags and 0x02 != 0) previous!!.second + y else y
+                val absoluteZ = if (flags and 0x04 != 0) previous!!.third + z else z
+                val absolutePosition = Triple(absoluteX, absoluteY, absoluteZ)
+                lastPlayerPosition = absolutePosition
+                _spawnPosition.tryEmit(absolutePosition)
             }
             ids.playKeepAlive -> {
                 val id = readLong(stream)
@@ -835,11 +837,9 @@ class MinecraftProtocolClient {
                 _chatMessages.tryEmit(Pair(senderUuid.toString(), plainMessage))
             }
             ids.playSystemChat -> {
-                // The payload is anonymous NBT text-component data. It is deliberately not
-                // guessed from UTF-8 bytes; until an NBT component decoder is added, report it
-                // as unsupported instead of fabricating a chat message.
                 _protocolEvents.tryEmit("Received system-chat packet; NBT text-component decoding is unsupported.")
             }
+            else -> _protocolEvents.tryEmit("Received unhandled protocol 767 play packet id 0x${packetId.toString(16)}.")
         }
     }
 
