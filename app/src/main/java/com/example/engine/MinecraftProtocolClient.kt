@@ -356,6 +356,8 @@ class MinecraftProtocolClient {
             } catch (e: Exception) {
                 lastContactTimestamps["$host:$port"] = System.currentTimeMillis()
                 val friendlyError = when {
+                    port == 19132 || port == 19133 ->
+                        "Port $port is commonly used by Minecraft Bedrock Edition (UDP). This app currently supports Java Edition over TCP, not Bedrock. If your server is Java Edition, confirm that you entered its Java TCP port."
                     e is java.net.UnknownHostException -> "Could not resolve hostname '$host'. Check server address."
                     e is java.net.ConnectException -> "Connection refused. Server may be offline (start it in your Aternos panel) or port $port is closed."
                     e is java.net.SocketTimeoutException -> "Connection timed out after ${timeoutMs}ms. Server may be offline or starting up."
