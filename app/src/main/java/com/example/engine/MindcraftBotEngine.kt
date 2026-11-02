@@ -591,7 +591,7 @@ class MindcraftBotEngine(
             val stackSnippet = sw.toString().take(250)
 
             val current = _botState.value
-            val strategy = recoveryAction ?: "Auto-remediation applied."
+            val strategy = recoveryAction ?: "No automatic remediation was performed."
 
             log(LogLevel.ERROR, LogCategory.ERROR_WATCHDOG, "[$errorType]: $message")
 
@@ -602,7 +602,7 @@ class MindcraftBotEngine(
                 botCoordinates = "(${current.position.x.toInt()}, ${current.position.y.toInt()}, ${current.position.z.toInt()})",
                 currentGoal = current.currentGoal,
                 recoveryStrategyApplied = strategy,
-                isResolved = true
+                isResolved = false
             )
             database.errorReportDao().insertErrorReport(report)
 
