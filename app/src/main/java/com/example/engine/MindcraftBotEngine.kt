@@ -22,7 +22,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.PrintWriter
 import java.io.StringWriter
-import kotlin.random.Random
 
 class MindcraftBotEngine(
     private val database: AppDatabase,
@@ -295,7 +294,7 @@ class MindcraftBotEngine(
                     }
                     cleanMsg.equals("!status", ignoreCase = true) -> {
                         val s = _botState.value
-                        protocolClient.sendChatMessage("[Mindcraft] Health: ${s.health}/20, Food: ${s.food}/20, Task: ${s.activeTask}")
+                        protocolClient.sendChatMessage("[Mindcraft] Connection: ${s.status}. Live health and food readings are not available yet.")
                         log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !status to $sender")
                     }
                     cleanMsg.startsWith("!mine", ignoreCase = true) -> {
@@ -611,36 +610,7 @@ class MindcraftBotEngine(
         )
     }
 
-    private fun addItemToInventory(name: String, count: Int) {
-        val current = _botState.value
-        val existingIndex = current.inventory.indexOfFirst { it.displayName.equals(name, ignoreCase = true) }
-        val updated = current.inventory.toMutableList()
-
-        if (existingIndex >= 0) {
-            val item = updated[existingIndex]
-            updated[existingIndex] = item.copy(count = item.count + count)
-        } else {
-            updated.add(
-                InventoryItem(
-                    slot = updated.size,
-                    itemId = name.lowercase().replace(" ", "_"),
-                    displayName = name.replaceFirstChar { it.uppercase() },
-                    count = count
-                )
-            )
-        }
-        _botState.value = current.copy(inventory = updated)
-    }
-
-    private fun createDefaultInventory(): List<InventoryItem> = listOf(
-        InventoryItem(0, "diamond_pickaxe", "Diamond Pickaxe", 1),
-        InventoryItem(1, "iron_sword", "Iron Sword", 1),
-        InventoryItem(2, "iron_axe", "Iron Axe", 1),
-        InventoryItem(3, "torch", "Torch", 32),
-        InventoryItem(4, "cooked_beef", "Cooked Beef", 16),
-        InventoryItem(5, "oak_planks", "Oak Planks", 48),
-        InventoryItem(6, "cobblestone", "Cobblestone", 64)
-    )
+    private fun createDefaultInventory(): List<InventoryItem> = emptyList()
 
     private fun isThrottleError(message: String): Boolean {
         val lower = message.lowercase()
