@@ -471,7 +471,7 @@ fun DashboardScreen(
                                     color = DiamondBlue
                                 )
                                 Text(
-                                    text = "Position: (${botState.position.x.toInt()}, ${botState.position.y.toInt()}, ${botState.position.z.toInt()})",
+                                    text = if (botState.hasPositionUpdate) "Position: (${botState.position.x.toInt()}, ${botState.position.y.toInt()}, ${botState.position.z.toInt()})" else "Position: unavailable",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = TextMuted
                                 )
@@ -685,16 +685,16 @@ fun DashboardScreen(
                     Column {
                         Text("Bot Health", style = MaterialTheme.typography.labelSmall, color = TextMuted)
                         Text(
-                            text = "${botState.health} / 20",
+                            text = if (botState.health >= 0) "${botState.health} / 20" else "Unavailable",
                             style = MaterialTheme.typography.titleMedium,
-                            color = if (botState.health > 10) EmeraldGreen else RedstoneRed
+                            color = if (botState.health < 0) TextMuted else if (botState.health > 10) EmeraldGreen else RedstoneRed
                         )
                     }
 
                     Column {
                         Text("Food Level", style = MaterialTheme.typography.labelSmall, color = TextMuted)
                         Text(
-                            text = "${botState.food} / 20",
+                            text = if (botState.food >= 0) "${botState.food} / 20" else "Unavailable",
                             style = MaterialTheme.typography.titleMedium,
                             color = GoldYellow
                         )
