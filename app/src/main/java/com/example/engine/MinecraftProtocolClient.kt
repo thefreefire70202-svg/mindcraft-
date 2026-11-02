@@ -403,6 +403,7 @@ class MinecraftProtocolClient {
         if (detectedProtocol <= 0) {
             val status = queryServerStatus(host, port, timeoutMs.coerceAtLeast(7500))
             if (!status.isOnline || status.protocolVersion <= 0) {
+                setConnectionState(ProtocolState.ERROR)
                 return@withContext ConnectResult(
                     isSuccess = false,
                     message = "Server protocol could not be detected. Select a Minecraft version manually or make the server status endpoint reachable. No login packet was sent.",
@@ -614,7 +615,7 @@ class MinecraftProtocolClient {
                         reply.write(0)
                         sendProtocolPacket(reply.toByteArray())
                     }
-                    else -> {}
+                    else -> _protocolEvents.tryEmit("Received unhandled protocol 767 login packet id 0x${packetId.toString(16)}; payload was skipped.")
                 }
             }
 
@@ -723,8 +724,8 @@ class MinecraftProtocolClient {
             }
             ids.configPluginMessage -> handleConfigPluginMessage(stream, protocol)
             ids.configDisconnect -> {
-                val reason = parseDisconnectReason(readString(stream))
-                throw EOFException("Server disconnected during configuration: $reason")
+                _protocolEvents.tryEmit("Server sent a configuration disconnect packet. Its NBT reason component is not decoded by this client.")
+                throw EOFException("Server disconnected during configuration; NBT reason decoding is unsupported.")
             }
             ids.configFinish -> finishConfigurationAck(protocol)
             ids.configKeepAlive -> {
@@ -748,10 +749,7 @@ class MinecraftProtocolClient {
                 writeVarInt(reply, 0)
                 sendProtocolPacket(reply.toByteArray())
             }
-            else -> {
-                // Registry data, feature flags, tags and other server configuration payloads
-                // are not interpreted by this bot yet. They are framed and safely skipped.
-            }
+            else -> _protocolEvents.tryEmit("Received unhandled protocol 767 configuration packet id 0x${packetId.toString(16)}; payload was skipped.")
         }
     }
 
@@ -790,6 +788,7 @@ class MinecraftProtocolClient {
                 val yaw = readFloat(stream)
                 val pitch = readFloat(stream)
                 val flags = stream.read()
+                if (flags !in 0..255) throw EOFException("Truncated player-position flags.")
                 val teleportId = readVarInt(stream)
 
                 val confirm = ByteArrayOutputStream()
