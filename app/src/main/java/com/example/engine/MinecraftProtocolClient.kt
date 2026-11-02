@@ -103,6 +103,9 @@ private data class ProtocolPacketIds(
     val playPlayerChat: Int,
     val playPosition: Int,
     val playSystemChat: Int,
+    val playDisconnect: Int,
+    val playStartConfiguration: Int,
+    val playConfigurationAcknowledged: Int,
     val playTeleportConfirm: Int,
     val playChatMessage: Int,
     val playKeepAliveResponse: Int,
@@ -143,6 +146,9 @@ private object ProtocolPacketRegistry {
             playPlayerChat = 0x39,
             playPosition = 0x40,
             playSystemChat = 0x6C,
+            playDisconnect = 0x1D,
+            playStartConfiguration = 0x69,
+            playConfigurationAcknowledged = 0x0C,
             playTeleportConfirm = 0x00,
             playChatMessage = 0x06,
             playKeepAliveResponse = 0x18,
@@ -828,6 +834,17 @@ class MinecraftProtocolClient {
                 writeVarInt(pong, ids.playPong)
                 writeInt(pong, id)
                 sendProtocolPacket(pong.toByteArray())
+            }
+            ids.playDisconnect -> {
+                _protocolEvents.tryEmit("Server sent a Play disconnect packet. Its NBT reason component is not decoded by this client.")
+                throw EOFException("Server disconnected during Play; NBT reason decoding is unsupported.")
+            }
+            ids.playStartConfiguration -> {
+                val ack = ByteArrayOutputStream()
+                writeVarInt(ack, ids.playConfigurationAcknowledged)
+                sendProtocolPacket(ack.toByteArray())
+                setConnectionState(ProtocolState.CONFIGURATION)
+                sendClientInformation(isConfigurationState = true)
             }
             ids.playPlayerChat -> {
                 val senderUuid = UUID(readLong(stream), readLong(stream))
