@@ -215,6 +215,14 @@ class AiClient(
         apiKey: String,
         startTime: Long
     ): AiResponse {
+        if (endpoint.isBlank()) {
+            return unavailableResponse(
+                "Custom HTTP",
+                model,
+                startTime,
+                "Custom AI endpoint URL is missing."
+            )
+        }
         val targetUrl = if (endpoint.endsWith("/chat/completions")) endpoint else "$endpoint/chat/completions"
         val payload = JSONObject().apply {
             put("model", model)
