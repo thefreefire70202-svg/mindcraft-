@@ -30,11 +30,14 @@ Restore the intended Mindcraft-style Minecraft bot experience on Android:
 6. **Android reliability** — foreground session service and notification, lifecycle/cleanup, secure credential storage, Room migrations, and error recovery.
 7. **Release validation** — unit and protocol integration tests, Gradle build, APK archive integrity check, and installable debug APK artifact. A successful build is not proof of real-server gameplay compatibility.
 
-## Current status at archive time
+## Current implementation status (updated 2026-11-02)
 
 - PR #1 contains the first-stage honesty and connection-state repairs.
 - Protocol registry and packet handling are currently limited to protocol 767; this is not broad Minecraft version support.
-- Full gameplay actions, complete game-state decoding, SRV DNS, local AI inference, foreground service, secure credential storage, and proper database migrations remain unfinished.
+- Protocol-767 movement, mining-at-coordinate, and block-placement packet writers exist. Mining and placement are requests only; server block updates are not decoded, so success is not confirmed.
+- Coordinate movement now emits bounded 0.25-block straight-line waypoints (up to 64 blocks) rather than a single large position jump. This is not collision-aware pathfinding; no chunk/block collision map is available yet.
+- Automated tests now cover the waypoint planner and protocol-767 movement/mining/placement packet encoders, alongside host/port parsing tests.
+- Full game-state decoding (inventory, health, hunger, chunks and block updates), obstacle-aware navigation, crafting, chests, equipment, food, combat, survival, SRV DNS, broader protocol support, local AI inference, foreground service, secure credential storage, and proper database migrations remain unfinished.
 - The current branch head has not yet been confirmed by a successful test/build run. Do not describe the app as finished or release-ready until the remaining milestones are implemented and validated.
 
 ## Working rule
