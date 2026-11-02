@@ -7,7 +7,6 @@ import com.example.data.model.AiSettings
 import com.example.data.model.BotState
 import com.example.data.model.BotStatus
 import com.example.data.model.ChatMessage
-import com.example.data.model.InventoryItem
 import com.example.data.model.LogCategory
 import com.example.data.model.LogLevel
 import com.example.data.model.Position3D
@@ -31,7 +30,7 @@ class MindcraftBotEngine(
     val protocolClient = MinecraftProtocolClient()
 
     private val _botState = MutableStateFlow(
-        BotState(inventory = createDefaultInventory())
+        BotState(inventory = emptyList())
     )
     val botState: StateFlow<BotState> = _botState.asStateFlow()
 
@@ -586,13 +585,12 @@ class MindcraftBotEngine(
 
     private fun buildMindcraftPrompt(userGoal: String): String {
         val state = _botState.value
-        val invSummary = state.inventory.joinToString(", ") { "${it.displayName} x${it.count}" }
 
         return """
         Minecraft Bot: ${state.botName}
-        Health: ${state.health}/20, Food: ${state.food}/20
-        Position: (X: ${state.position.x.toInt()}, Y: ${state.position.y.toInt()}, Z: ${state.position.z.toInt()})
-        Inventory: [$invSummary]
+        Health and food: unavailable (the protocol client does not decode these game-state fields).
+        Position: unavailable until a position packet is decoded.
+        Inventory: unavailable until inventory packets are decoded.
         User Instruction: "$userGoal"
 
         Return a concise response for the user. Do not claim to perform Minecraft actions; game-action execution is currently disabled.
@@ -609,8 +607,6 @@ class MindcraftBotEngine(
             )
         )
     }
-
-    private fun createDefaultInventory(): List<InventoryItem> = emptyList()
 
     private fun isThrottleError(message: String): Boolean {
         val lower = message.lowercase()
