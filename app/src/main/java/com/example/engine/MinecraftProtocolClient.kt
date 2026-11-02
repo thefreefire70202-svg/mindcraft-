@@ -924,31 +924,30 @@ class MinecraftProtocolClient {
             !stepLength.isFinite() || stepLength <= 0.0 || stepDelayMs < 0L
         ) return@withContext false
 
-        val dx = targetX - start.first
-        val dy = targetY - start.second
-        val dz = targetZ - start.third
-        val distance = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
-        if (distance > maxDistance) {
-            _protocolEvents.tryEmit("Walk request rejected: target is " + distance + " blocks away; limit is " + maxDistance + ".")
+        val waypoints = try {
+            MinecraftMovementPlanner.plan(
+                start = start,
+                target = Triple(targetX, targetY, targetZ),
+                maxDistance = maxDistance,
+                stepLength = stepLength
+            )
+        } catch (e: IllegalArgumentException) {
+            _protocolEvents.tryEmit("Walk request rejected: ${e.message}")
             return@withContext false
         }
-        if (distance < 0.01) return@withContext true
+        if (waypoints.isEmpty()) return@withContext true
 
-        val steps = kotlin.math.ceil(distance / stepLength).toInt().coerceAtLeast(1)
+        val dx = targetX - start.first
+        val dz = targetZ - start.third
         val yaw = Math.toDegrees(kotlin.math.atan2(-dx, dz)).toFloat()
-        for (step in 1..steps) {
+        for ((index, waypoint) in waypoints.withIndex()) {
             if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY) return@withContext false
-            val fraction = step.toDouble() / steps
             val wrote = sendPlayerPosition(
-                start.first + dx * fraction,
-                start.second + dy * fraction,
-                start.third + dz * fraction,
-                yaw = yaw,
-                pitch = lastPlayerPitch,
-                onGround = true
+                waypoint.first, waypoint.second, waypoint.third,
+                yaw = yaw, pitch = lastPlayerPitch, onGround = true
             )
             if (!wrote) return@withContext false
-            if (step < steps && stepDelayMs > 0L) delay(stepDelayMs)
+            if (index < waypoints.lastIndex && stepDelayMs > 0L) delay(stepDelayMs)
         }
         true
     }
