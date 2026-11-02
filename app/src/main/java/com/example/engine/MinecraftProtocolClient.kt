@@ -623,6 +623,9 @@ class MinecraftProtocolClient {
 
             if (completedResult.isSuccess && scope != null) {
                 startPacketListenerLoop(scope, protocol)
+            } else if (!completedResult.isSuccess) {
+                disconnect()
+                setConnectionState(ProtocolState.ERROR)
             }
             completedResult
         } catch (e: Exception) {
