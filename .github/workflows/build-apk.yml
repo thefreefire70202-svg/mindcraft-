@@ -32,12 +32,10 @@ jobs:
 
       - name: Prepare Android Build Environment
         run: |
-          # Create placeholder .env for Secrets Gradle Plugin if not present
           if [ ! -f ".env" ]; then
             touch .env
           fi
 
-          # Ensure debug.keystore is present
           if [ ! -f "debug.keystore" ]; then
             if [ -f "debug.keystore.base64" ]; then
               base64 -d debug.keystore.base64 > debug.keystore
@@ -60,9 +58,22 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
+      - name: Verify APK and create checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK_PATH"
+          unzip -t "$APK_PATH"
+          sha256sum "$APK_PATH" | tee app-debug.apk.sha256
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: mindcraft-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app-debug.apk.sha256
+          if-no-files-found: error
           retention-days: 14
+          compression-level: 0
