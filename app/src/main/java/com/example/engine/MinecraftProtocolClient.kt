@@ -904,6 +904,56 @@ class MinecraftProtocolClient {
     }
 
     /**
+     * Walk in short position increments toward a coordinate. This is straight-line
+     * movement only: without decoded chunk collision data it is not obstacle-aware
+     * pathfinding. Success means packets were written locally, not that the server
+     * accepted the final position.
+     */
+    suspend fun walkToCoordinates(
+        targetX: Double,
+        targetY: Double,
+        targetZ: Double,
+        maxDistance: Double = 64.0,
+        stepLength: Double = 0.25,
+        stepDelayMs: Long = 50L
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY) return@withContext false
+        val start = lastPlayerPosition ?: return@withContext false
+        if (!targetX.isFinite() || !targetY.isFinite() || !targetZ.isFinite() ||
+            !maxDistance.isFinite() || maxDistance <= 0.0 ||
+            !stepLength.isFinite() || stepLength <= 0.0 || stepDelayMs < 0L
+        ) return@withContext false
+
+        val dx = targetX - start.first
+        val dy = targetY - start.second
+        val dz = targetZ - start.third
+        val distance = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+        if (distance > maxDistance) {
+            _protocolEvents.tryEmit("Walk request rejected: target is " + distance + " blocks away; limit is " + maxDistance + ".")
+            return@withContext false
+        }
+        if (distance < 0.01) return@withContext true
+
+        val steps = kotlin.math.ceil(distance / stepLength).toInt().coerceAtLeast(1)
+        val yaw = Math.toDegrees(kotlin.math.atan2(-dx, dz)).toFloat()
+        for (step in 1..steps) {
+            if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY) return@withContext false
+            val fraction = step.toDouble() / steps
+            val wrote = sendPlayerPosition(
+                start.first + dx * fraction,
+                start.second + dy * fraction,
+                start.third + dz * fraction,
+                yaw = yaw,
+                pitch = lastPlayerPitch,
+                onGround = true
+            )
+            if (!wrote) return@withContext false
+            if (step < steps && stepDelayMs > 0L) delay(stepDelayMs)
+        }
+        true
+    }
+
+    /**
      * Send the two serverbound Player Action packets for a normal dig attempt.
      * The server remains authoritative; callers must wait for a block update
      * before treating the block as mined.
