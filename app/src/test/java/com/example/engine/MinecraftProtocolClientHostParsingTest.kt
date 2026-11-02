@@ -66,4 +66,25 @@ class MinecraftProtocolClientHostParsingTest {
         assertEquals(false, MinecraftProtocolClient.isLikelyBedrockPort(53750))
     }
 
+
+    @Test
+    fun autoDetectCanProbeSupportedProtocolForOlderAdvertisedBackend() {
+        assertEquals(true, MinecraftProtocolClient.shouldAttemptProtocol767Compatibility(340, null))
+    }
+
+    @Test
+    fun autoDetectCanProbeSupportedProtocolForNewerAdvertisedServer() {
+        assertEquals(true, MinecraftProtocolClient.shouldAttemptProtocol767Compatibility(777, null))
+    }
+
+    @Test
+    fun autoDetectDoesNotProbeWhenServerAlreadyAdvertisesSupportedProtocol() {
+        assertEquals(false, MinecraftProtocolClient.shouldAttemptProtocol767Compatibility(767, null))
+    }
+
+    @Test
+    fun manualProtocolOverrideNeverGetsSilentlyReplaced() {
+        assertEquals(false, MinecraftProtocolClient.shouldAttemptProtocol767Compatibility(777, 777))
+    }
+
 }
