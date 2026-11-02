@@ -24,7 +24,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "mindcraft_bot.db"
-                ).fallbackToDestructiveMigration(dropAllTables = true).build()
+                ).build()
                 INSTANCE = instance
                 instance
             }
