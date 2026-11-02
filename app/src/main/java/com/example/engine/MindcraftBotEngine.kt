@@ -200,7 +200,13 @@ class MindcraftBotEngine(
                 // Greet players in server chat
                 coroutineScope.launch(Dispatchers.IO) {
                     delay(1200)
-                    protocolClient.sendChatMessage("Mindcraft AI Bot online! Type !help or chat with me.")
+                    val wrote = protocolClient.sendChatMessage("Mindcraft bot session is ready. Type !help for supported commands.")
+                    log(
+                        if (wrote) LogLevel.INFO else LogLevel.WARN,
+                        LogCategory.CHAT,
+                        if (wrote) "Greeting packet written to the local TCP socket; server-side delivery is not confirmed."
+                        else "Greeting was not written; chat transmission is unavailable."
+                    )
                 }
 
                 startChatListener(aiSettings)
@@ -386,7 +392,15 @@ class MindcraftBotEngine(
 
             // Send to real server over TCP if connected
             if (_botState.value.isRealTcpConnected) {
-                protocolClient.sendChatMessage(message)
+                val wrote = protocolClient.sendChatMessage(message)
+                log(
+                    if (wrote) LogLevel.INFO else LogLevel.WARN,
+                    LogCategory.CHAT,
+                    if (wrote) "Chat packet written to the local TCP socket; server-side delivery is not confirmed."
+                    else "Chat packet was not transmitted."
+                )
+            } else {
+                log(LogLevel.WARN, LogCategory.CHAT, "Chat was kept locally; bot is not connected to a Minecraft server.")
             }
 
             // If AI is enabled, process instruction and have the bot reply & execute commands
@@ -423,7 +437,13 @@ class MindcraftBotEngine(
                     log(LogLevel.INFO, LogCategory.CHAT, "<${_botState.value.botName}> ${aiResponse.chatMessage}")
 
                     if (_botState.value.isRealTcpConnected) {
-                        protocolClient.sendChatMessage(aiResponse.chatMessage)
+                        val wrote = protocolClient.sendChatMessage(aiResponse.chatMessage)
+                        log(
+                            if (wrote) LogLevel.INFO else LogLevel.WARN,
+                            LogCategory.CHAT,
+                            if (wrote) "AI reply packet written to the local TCP socket; server-side delivery is not confirmed."
+                            else "AI reply was not transmitted to the local TCP socket."
+                        )
                     }
                 }
 
