@@ -922,7 +922,7 @@ class MinecraftProtocolClient {
         }
         try {
             val startSequence = nextBlockChangeSequence()
-            sendProtocolPacket(MinecraftPlayPacketEncoder.dig(status = 0, x, y, z, face, startSequence))
+            sendProtocolPacket(MinecraftPlayPacketEncoder.dig(0, x, y, z, face, startSequence))
             delay(1000L) // conservative minimum attempt; exact break time requires block/tool state
             val finishSequence = nextBlockChangeSequence()
             sendProtocolPacket(MinecraftPlayPacketEncoder.dig(status = 2, x, y, z, face, finishSequence))
