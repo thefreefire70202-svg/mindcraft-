@@ -76,6 +76,7 @@ private data class ProtocolPacketIds(
     val loginStart: Int,
     val loginSuccess: Int,
     val loginDisconnect: Int,
+    val loginEncryptionRequest: Int,
     val loginCompression: Int,
     val loginPluginRequest: Int,
     val loginCookieRequest: Int,
@@ -114,6 +115,7 @@ private object ProtocolPacketRegistry {
             loginStart = 0x00,
             loginSuccess = 0x02,
             loginDisconnect = 0x00,
+            loginEncryptionRequest = 0x01,
             loginCompression = 0x03,
             loginPluginRequest = 0x04,
             loginCookieRequest = 0x05,
@@ -503,7 +505,7 @@ class MinecraftProtocolClient {
                 }
 
                 when (packetId) {
-                    0x00 -> {
+                    packetIds.loginDisconnect -> {
                         // Disconnected by server
                         val reasonStream = ByteArrayInputStream(payload)
                         val rawReason = readString(reasonStream)
@@ -519,7 +521,7 @@ class MinecraftProtocolClient {
                         )
                         break
                     }
-                    0x01 -> {
+                    packetIds.loginEncryptionRequest -> {
                         // Encryption Request (Server requires premium Mojang auth / online-mode=true)
                         disconnect()
                         loginResult = ConnectResult(
@@ -532,7 +534,7 @@ class MinecraftProtocolClient {
                         )
                         break
                     }
-                    0x02 -> {
+                    packetIds.loginSuccess -> {
                         // Login Success. Modern protocol versions must finish Configuration before success.
                         loginSuccess = true
                         currentState = ProtocolState.LOGIN_SUCCESS
@@ -556,12 +558,12 @@ class MinecraftProtocolClient {
                             break
                         }
                     }
-                    0x03 -> {
+                    packetIds.loginCompression -> {
                         // Set Compression
                         val thresholdStream = ByteArrayInputStream(payload)
                         compressionThreshold = readVarInt(thresholdStream)
                     }
-                    0x04 -> {
+                    packetIds.loginPluginRequest -> {
                         // Login Plugin Request (Custom Query) -> Answer Login Plugin Response (Packet 0x02, messageId, successful = false)
                         try {
                             val queryStream = ByteArrayInputStream(payload)
@@ -573,7 +575,7 @@ class MinecraftProtocolClient {
                             sendProtocolPacket(reply.toByteArray())
                         } catch (_: Exception) {}
                     }
-                    0x05 -> {
+                    packetIds.loginCookieRequest -> {
                         // Cookie Request (1.20.5+) -> Answer Cookie Response (Packet 0x04, key, hasPayload = false)
                         try {
                             val cookieStream = ByteArrayInputStream(payload)
@@ -620,7 +622,6 @@ class MinecraftProtocolClient {
     }
 
     fun sendClientInformation(isConfigurationState: Boolean) {
-        try {
             val bytes = ByteArrayOutputStream()
             // In CONFIGURATION state, Client Information is packet 0x00
             // In PLAY state, Client Information is packet 0x09 (in 1.21.1) or 0x08 (in 1.20.4)
@@ -636,7 +637,6 @@ class MinecraftProtocolClient {
             bytes.write(0) // text filtering: false
             bytes.write(1) // allow server listings: true
             sendProtocolPacket(bytes.toByteArray())
-        } catch (_: Exception) {}
     }
 
     private fun startPacketListenerLoop(scope: CoroutineScope, protocol: Int) {
@@ -675,6 +675,7 @@ class MinecraftProtocolClient {
                 disconnectReason = "TCP error: ${e.localizedMessage}"
             } finally {
                 isConnected = false
+                if (disconnectReason != "Connection closed normally") currentState = ProtocolState.ERROR
                 _disconnectEvent.tryEmit(disconnectReason)
             }
         }
@@ -733,8 +734,8 @@ class MinecraftProtocolClient {
         val finishAck = ByteArrayOutputStream()
         writeVarInt(finishAck, ids.configFinishAck)
         sendProtocolPacket(finishAck.toByteArray())
-        currentState = ProtocolState.PLAY_READY
         sendClientInformation(isConfigurationState = false)
+        currentState = ProtocolState.PLAY_READY
     }
 
     private fun handleConfigPluginMessage(stream: InputStream, protocol: Int) {
@@ -814,23 +815,6 @@ class MinecraftProtocolClient {
                 _protocolEvents.tryEmit("Received system-chat packet; NBT text-component decoding is unsupported.")
             }
         }
-    }
-
-    private fun parseChatSenderAndContent(rawText: String): Pair<String, String> {
-        val clean = cleanFormattingCodes(rawText).trim()
-        val matchAngle = Regex("""^<([a-zA-Z0-9_]{2,16})>\s*(.*)$""").find(clean)
-        if (matchAngle != null) {
-            return Pair(matchAngle.groupValues[1], matchAngle.groupValues[2])
-        }
-        val matchColon = Regex("""^([a-zA-Z0-9_]{2,16}):\s*(.*)$""").find(clean)
-        if (matchColon != null) {
-            return Pair(matchColon.groupValues[1], matchColon.groupValues[2])
-        }
-        val matchBracket = Regex("""^\[([a-zA-Z0-9_]{2,16})\]\s*(.*)$""").find(clean)
-        if (matchBracket != null) {
-            return Pair(matchBracket.groupValues[1], matchBracket.groupValues[2])
-        }
-        return Pair("Server", clean)
     }
 
     suspend fun sendChatMessage(message: String): Boolean = withContext(Dispatchers.IO) {
@@ -1017,6 +1001,16 @@ class MinecraftProtocolClient {
         for (i in 7 downTo 0) {
             out.write(((value ushr (i * 8)) and 0xFF).toInt())
         }
+    }
+
+    private fun readInt(input: InputStream): Int {
+        val bytes = ByteArray(4)
+        readFully(input, bytes)
+        return ByteBuffer.wrap(bytes).int
+    }
+
+    private fun writeInt(out: OutputStream, value: Int) {
+        out.write(ByteBuffer.allocate(4).putInt(value).array())
     }
 
     private fun readLong(input: InputStream): Long {
