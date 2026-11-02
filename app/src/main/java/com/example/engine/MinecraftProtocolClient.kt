@@ -192,6 +192,8 @@ class MinecraftProtocolClient {
     val protocolEvents: SharedFlow<String> = _protocolEvents.asSharedFlow()
 
     companion object {
+        private const val MAX_PACKET_SIZE = 2 * 1024 * 1024
+
         fun parseHostAndPort(rawHost: String, defaultPort: Int = 25565): Pair<String, Int> {
             val clean = rawHost.trim()
             .removePrefix("http://")
@@ -896,6 +898,9 @@ class MinecraftProtocolClient {
     private fun readNextPacket(): Pair<Int, ByteArray> {
         val inStream = inputStream ?: throw EOFException("Socket not connected")
         val packetLength = readVarInt(inStream)
+        if (packetLength <= 0 || packetLength > MAX_PACKET_SIZE) {
+            throw IllegalStateException("Invalid Minecraft packet length: $packetLength")
+        }
 
         if (compressionThreshold < 0) {
             // Uncompressed packet
@@ -912,38 +917,60 @@ class MinecraftProtocolClient {
             readFully(inStream, envelopeBytes)
             val envelopeStream = ByteArrayInputStream(envelopeBytes)
             val dataLength = readVarInt(envelopeStream)
+            if (dataLength < 0 || dataLength > MAX_PACKET_SIZE) {
+                throw IllegalStateException("Invalid uncompressed packet length: $dataLength")
+            }
 
             if (dataLength == 0) {
-                // Uncompressed data inside envelope
+                // Uncompressed data inside the compression envelope.
+                if (envelopeStream.available() <= 0 || envelopeStream.available() >= compressionThreshold) {
+                    throw IllegalStateException("Invalid uncompressed packet for compression threshold $compressionThreshold.")
+                }
                 val packetId = readVarInt(envelopeStream)
                 val remaining = ByteArray(envelopeStream.available())
-                envelopeStream.read(remaining)
-                return Pair(packetId, remaining)
-            } else {
-                // Compressed data inside envelope
-                val compressedPayload = ByteArray(envelopeStream.available())
-                envelopeStream.read(compressedPayload)
-
-                val inflater = Inflater()
-                val decompressed = ByteArray(dataLength)
-                try {
-                    inflater.setInput(compressedPayload)
-                    inflater.inflate(decompressed)
-                } finally {
-                    inflater.end()
-                }
-
-                val decompStream = ByteArrayInputStream(decompressed)
-                val packetId = readVarInt(decompStream)
-                val remaining = ByteArray(decompStream.available())
-                decompStream.read(remaining)
+                readFully(envelopeStream, remaining)
                 return Pair(packetId, remaining)
             }
+
+            if (dataLength < compressionThreshold) {
+                throw IllegalStateException("Compressed packet is smaller than the negotiated compression threshold.")
+            }
+
+            val compressedPayload = ByteArray(envelopeStream.available())
+            readFully(envelopeStream, compressedPayload)
+            val inflater = Inflater()
+            val decompressed = ByteArray(dataLength)
+            try {
+                inflater.setInput(compressedPayload)
+                var total = 0
+                while (!inflater.finished() && total < decompressed.size) {
+                    val count = inflater.inflate(decompressed, total, decompressed.size - total)
+                    if (count == 0) {
+                        if (inflater.needsDictionary()) throw IllegalStateException("Compressed packet requires an unsupported dictionary.")
+                        if (inflater.needsInput()) break
+                        throw IllegalStateException("Compressed packet decompressor made no progress.")
+                    }
+                    total += count
+                }
+                if (!inflater.finished() || total != dataLength || inflater.remaining != 0) {
+                    throw IllegalStateException("Compressed packet length does not match its declared size.")
+                }
+            } finally {
+                inflater.end()
+            }
+
+            val decompStream = ByteArrayInputStream(decompressed)
+            val packetId = readVarInt(decompStream)
+            val remaining = ByteArray(decompStream.available())
+            readFully(decompStream, remaining)
+            return Pair(packetId, remaining)
         }
     }
 
+    @Synchronized
     private fun sendProtocolPacket(payload: ByteArray) {
-        val out = outputStream ?: return
+        require(payload.isNotEmpty() && payload.size <= MAX_PACKET_SIZE) { "Invalid outgoing Minecraft packet size: ${payload.size}" }
+        val out = outputStream ?: throw EOFException("Socket output stream is unavailable")
         if (compressionThreshold < 0) {
             sendRawPacket(out, payload)
         } else {
@@ -982,6 +1009,7 @@ class MinecraftProtocolClient {
     }
 
     private fun sendRawPacket(out: OutputStream, payload: ByteArray) {
+        require(payload.isNotEmpty() && payload.size <= MAX_PACKET_SIZE) { "Invalid outgoing Minecraft packet size: ${payload.size}" }
         val packet = ByteArrayOutputStream()
         writeVarInt(packet, payload.size)
         packet.write(payload)
@@ -1001,25 +1029,27 @@ class MinecraftProtocolClient {
     private fun readVarInt(input: InputStream): Int {
         var value = 0
         var size = 0
-        var b: Int
         while (true) {
-            b = input.read()
+            val b = input.read()
             if (b == -1) throw EOFException("End of stream while reading VarInt")
-            value = value or ((b and 127) shl (size++ * 7))
-            if (size > 5) throw RuntimeException("VarInt is too big")
-            if ((b and 128) != 128) break
+            if (size == 4 && (b and 0xF0) != 0) throw IllegalStateException("VarInt exceeds 32 bits.")
+            value = value or ((b and 127) shl (size * 7))
+            size++
+            if (size > 5) throw IllegalStateException("VarInt is too big.")
+            if ((b and 128) == 0) return value
         }
-        return value
     }
 
     private fun writeString(out: OutputStream, str: String) {
         val bytes = str.toByteArray(StandardCharsets.UTF_8)
+        require(bytes.size <= 32767 * 4) { "Minecraft string exceeds the supported byte length." }
         writeVarInt(out, bytes.size)
         out.write(bytes)
     }
 
     private fun readString(input: InputStream): String {
         val length = readVarInt(input)
+        if (length < 0 || length > 32767 * 4) throw IllegalStateException("Invalid Minecraft string length: $length")
         val buffer = ByteArray(length)
         readFully(input, buffer)
         return String(buffer, StandardCharsets.UTF_8)
