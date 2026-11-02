@@ -693,7 +693,19 @@ class MinecraftProtocolClient {
                 disconnectReason = "TCP error: ${e.localizedMessage}"
             } finally {
                 isConnected = false
-                if (disconnectReason != "Connection closed normally") setConnectionState(ProtocolState.ERROR)
+                setConnectionState(
+                    if (disconnectReason == "Connection closed normally") ProtocolState.DISCONNECTED
+                    else ProtocolState.ERROR
+                )
+                try {
+                    socket?.close()
+                } catch (e: Exception) {
+                    _protocolEvents.tryEmit("Listener socket cleanup failed: ${e.message ?: e.javaClass.simpleName}")
+                }
+                socket = null
+                inputStream = null
+                outputStream = null
+                compressionThreshold = -1
                 _disconnectEvent.tryEmit(disconnectReason)
             }
         }
