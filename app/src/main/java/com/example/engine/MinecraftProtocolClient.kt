@@ -57,11 +57,14 @@ data class ConnectResult(
 )
 
 enum class ProtocolState {
-    HANDSHAKE,
-    STATUS,
-    LOGIN,
+    TCP_CONNECTED,
+    HANDSHAKE_SENT,
+    LOGIN_STARTED,
+    LOGIN_SUCCESS,
     CONFIGURATION,
-    PLAY
+    PLAY_READY,
+    DISCONNECTED,
+    ERROR
 }
 
 class MinecraftProtocolClient {
@@ -70,13 +73,13 @@ class MinecraftProtocolClient {
     private var outputStream: OutputStream? = null
     private var isConnected = false
     private var compressionThreshold = -1
-    private var currentState = ProtocolState.HANDSHAKE
+    private var currentState = ProtocolState.DISCONNECTED
     private var packetListenerJob: Job? = null
 
     private val protocolCache = ConcurrentHashMap<String, CachedServerProtocol>()
     private val lastContactTimestamps = ConcurrentHashMap<String, Long>()
 
-    var currentProtocolVersion: Int = 765
+    var currentProtocolVersion: Int = 0
         private set
     var currentVersionName: String = "Auto-Detect"
         private set
@@ -150,10 +153,10 @@ class MinecraftProtocolClient {
                 val outStream = s.getOutputStream()
 
                 // 1. Send Handshake Packet (ID: 0x00, NextState: 1 = Status)
-                // Use protocol 767 (Minecraft 1.21.1) which modern servers (Purpur/Paper/Aternos/Velocity) accept without rejecting
+                // Status handshake protocol -1 is version-independent; the server reports its actual protocol in the JSON response.
                 val handshakeBytes = ByteArrayOutputStream()
                 writeVarInt(handshakeBytes, 0x00) // Packet ID
-                writeVarInt(handshakeBytes, 767)  // Protocol 767 (1.21.1 standard for status ping)
+                writeVarInt(handshakeBytes, -1)  // Unknown protocol for version-independent status ping
                 writeString(handshakeBytes, host) // Server hostname
                 handshakeBytes.write((port shr 8) and 0xFF)
                 handshakeBytes.write(port and 0xFF)
@@ -271,11 +274,23 @@ class MinecraftProtocolClient {
             }
         }
 
-        // 2. If protocol is still unknown, default directly to 767 (1.21.1)
-        // DO NOT open a second status socket here, as that triggers connection-throttle!
+        // A direct join still needs real version detection. Never guess a protocol.
         if (detectedProtocol <= 0) {
-            detectedProtocol = 767
-            detectedName = "1.21.x"
+            val status = queryServerStatus(host, port, timeoutMs.coerceAtLeast(7500))
+            if (!status.isOnline || status.protocolVersion <= 0) {
+                return@withContext ConnectResult(
+                    isSuccess = false,
+                    message = "Server protocol could not be detected. Select a Minecraft version manually or make the server status endpoint reachable. No login packet was sent.",
+                    protocolVersionUsed = 0,
+                    versionName = "Unknown",
+                    isSnapshot = false,
+                    exception = IllegalStateException(status.error ?: "Server did not provide a valid protocol version.")
+                )
+            }
+            detectedProtocol = status.protocolVersion
+            detectedName = status.versionName
+            isSnapshot = status.isSnapshot
+            setCachedProtocol(host, port, detectedProtocol, detectedName, isSnapshot)
         }
 
         currentProtocolVersion = detectedProtocol
@@ -324,7 +339,7 @@ class MinecraftProtocolClient {
             outputStream = s.getOutputStream()
             isConnected = true
             compressionThreshold = -1
-            currentState = ProtocolState.HANDSHAKE
+            currentState = ProtocolState.TCP_CONNECTED
             lastContactTimestamps["$host:$port"] = System.currentTimeMillis()
 
             // 1. Send Handshake Packet with NextState = 2 (Login)
@@ -337,7 +352,7 @@ class MinecraftProtocolClient {
             writeVarInt(handshakeBytes, 2) // Next State = 2 (Login)
 
             sendRawPacket(outputStream!!, handshakeBytes.toByteArray())
-            currentState = ProtocolState.LOGIN
+            currentState = ProtocolState.HANDSHAKE_SENT
 
             // 2. Send Login Start Packet (Packet ID 0x00 in Login State)
             val offlineUuid = UUID.nameUUIDFromBytes("OfflinePlayer:$username".toByteArray(StandardCharsets.UTF_8))
@@ -362,19 +377,20 @@ class MinecraftProtocolClient {
             }
 
             sendProtocolPacket(loginBytes.toByteArray())
+            currentState = ProtocolState.LOGIN_STARTED
 
             // 3. Read Login Response packets until Login Success (0x02) or error
             var loginSuccess = false
             var loginResult: ConnectResult? = null
 
-            while ((!loginSuccess || (protocol >= 764 && currentState != ProtocolState.PLAY)) && isCurrentlyConnected()) {
+            while ((!loginSuccess || (protocol >= 764 && currentState != ProtocolState.PLAY_READY)) && isCurrentlyConnected()) {
                 val (packetId, payload) = readNextPacket()
 
                 // Login Success is not a completed session on 1.20.2+.
                 // Keep consuming Configuration packets until the server sends Finish Configuration.
                 if (loginSuccess && protocol >= 764) {
                     handleConfigurationPacket(packetId, payload, protocol)
-                    if (currentState == ProtocolState.PLAY) {
+                    if (currentState == ProtocolState.PLAY_READY) {
                         loginResult = ConnectResult(
                             isSuccess = true,
                             message = "Joined $versionName server (Protocol: $protocol) as '$username'. Configuration completed.",
@@ -420,6 +436,7 @@ class MinecraftProtocolClient {
                     0x02 -> {
                         // Login Success. Modern protocol versions must finish Configuration before success.
                         loginSuccess = true
+                        currentState = ProtocolState.LOGIN_SUCCESS
                         if (protocol >= 764) {
                             val ackBytes = ByteArrayOutputStream()
                             writeVarInt(ackBytes, 0x03) // Serverbound Login Acknowledged
@@ -428,7 +445,7 @@ class MinecraftProtocolClient {
                             sendClientInformation(isConfigurationState = true)
                             socket?.soTimeout = 45000
                         } else {
-                            currentState = ProtocolState.PLAY
+                            currentState = ProtocolState.PLAY_READY
                             socket?.soTimeout = 45000
                             loginResult = ConnectResult(
                                 isSuccess = true,
@@ -491,6 +508,7 @@ class MinecraftProtocolClient {
             completedResult
         } catch (e: Exception) {
             disconnect()
+            currentState = ProtocolState.ERROR
             ConnectResult(
                 isSuccess = false,
                 message = e.localizedMessage ?: "Failed to connect to server",
@@ -527,7 +545,7 @@ class MinecraftProtocolClient {
             val heartbeatJob = launch {
                 while (isActive && isCurrentlyConnected()) {
                     delay(2000L)
-                    if (currentState == ProtocolState.PLAY && isCurrentlyConnected()) {
+                    if (currentState == ProtocolState.PLAY_READY && isCurrentlyConnected()) {
                         try {
                             val hb = ByteArrayOutputStream()
                             val onGroundPacketId = when {
@@ -567,7 +585,7 @@ class MinecraftProtocolClient {
                         ProtocolState.CONFIGURATION -> {
                             handleConfigurationPacket(packetId, payload, protocol)
                         }
-                        ProtocolState.PLAY -> {
+                        ProtocolState.PLAY_READY -> {
                             handlePlayPacket(packetId, payload, protocol)
                         }
                         else -> {}
@@ -688,7 +706,7 @@ class MinecraftProtocolClient {
             // In 1.20.2 - 1.20.4 (764..765), Serverbound Finish Configuration is 0x02
             writeVarInt(finishAck, if (protocol >= 766) 0x03 else 0x02)
             sendProtocolPacket(finishAck.toByteArray())
-            currentState = ProtocolState.PLAY
+            currentState = ProtocolState.PLAY_READY
 
             // Send Client Information in Play state
             sendClientInformation(isConfigurationState = false)
@@ -853,7 +871,7 @@ class MinecraftProtocolClient {
         inputStream = null
         outputStream = null
         compressionThreshold = -1
-        currentState = ProtocolState.HANDSHAKE
+        currentState = ProtocolState.DISCONNECTED
     }
 
     fun isCurrentlyConnected(): Boolean = isConnected && socket?.isConnected == true && socket?.isClosed == false
