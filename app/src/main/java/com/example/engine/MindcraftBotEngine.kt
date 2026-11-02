@@ -486,7 +486,7 @@ class MindcraftBotEngine(
                     log(LogLevel.WARN, LogCategory.ACTION, "Move command requires three numeric coordinates.")
                     return
                 }
-                protocolClient.sendPlayerPosition(x, y, z)
+                protocolClient.walkToCoordinates(x, y, z)
             }
             "mine" -> {
                 if (values.size !in 3..4) {
