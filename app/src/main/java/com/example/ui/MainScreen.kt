@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -61,6 +62,7 @@ import com.example.ui.theme.TextSecondary
 sealed class NavTab(val title: String, val icon: ImageVector, val tag: String) {
     object Bot : NavTab("Bot", Icons.Default.Dns, "nav_bot")
     object AiSetup : NavTab("AI Setup", Icons.Default.SmartToy, "nav_ai_setup")
+    object Brain : NavTab("Brain", Icons.Default.Psychology, "nav_brain")
     object PingServer : NavTab("Ping Server", Icons.Default.Wifi, "nav_ping_server")
     object Logs : NavTab("Logs", Icons.AutoMirrored.Filled.ListAlt, "nav_logs")
 }
@@ -86,6 +88,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val tabs = listOf(
         NavTab.Bot,
         NavTab.AiSetup,
+        NavTab.Brain,
         NavTab.PingServer,
         NavTab.Logs
     )
@@ -214,7 +217,8 @@ fun MainScreen(viewModel: MainViewModel) {
                         onActivateModel = { modelId -> viewModel.activateLocalModel(modelId) },
                         onAddCustomModel = { name, url, mb -> viewModel.addCustomModel(name, url, mb) }
                     )
-                    2 -> ServerQueryScreen(
+                    2 -> BotBrainScreen(botState = botState, logs = recentLogs)
+                    3 -> ServerQueryScreen(
                         queryResult = serverQueryResult,
                         isLoading = isQueryingServer,
                         onQueryServer = { host, port -> viewModel.queryServer(host, port) },
@@ -223,7 +227,7 @@ fun MainScreen(viewModel: MainViewModel) {
                             currentTab = 0
                         }
                     )
-                    3 -> ConsoleScreen(
+                    4 -> ConsoleScreen(
                         logs = recentLogs,
                         onClearLogs = { viewModel.clearLogs() }
                     )

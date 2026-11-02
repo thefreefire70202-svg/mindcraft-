@@ -7,7 +7,6 @@ import com.example.data.model.AiSettings
 import com.example.data.model.BotState
 import com.example.data.model.BotStatus
 import com.example.data.model.ChatMessage
-import com.example.data.model.InventoryItem
 import com.example.data.model.LogCategory
 import com.example.data.model.LogLevel
 import com.example.data.model.Position3D
@@ -22,7 +21,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.PrintWriter
 import java.io.StringWriter
-import kotlin.random.Random
 
 class MindcraftBotEngine(
     private val database: AppDatabase,
@@ -32,7 +30,7 @@ class MindcraftBotEngine(
     val protocolClient = MinecraftProtocolClient()
 
     private val _botState = MutableStateFlow(
-        BotState(inventory = createDefaultInventory())
+        BotState(inventory = emptyList())
     )
     val botState: StateFlow<BotState> = _botState.asStateFlow()
 
@@ -142,7 +140,7 @@ class MindcraftBotEngine(
                 rawHost = cleanHost,
                 rawPort = effectivePort,
                 username = cleanBotName,
-                protocolVersionOverride = if (detectedProtocol > 0) detectedProtocol else null,
+                protocolVersionOverride = overrideProtocol,
                 knownVersionName = detectedVersionName,
                 knownIsSnapshot = detectedIsSnapshot,
                 scope = coroutineScope
@@ -171,7 +169,7 @@ class MindcraftBotEngine(
                     rawHost = cleanHost,
                     rawPort = effectivePort,
                     username = cleanBotName,
-                    protocolVersionOverride = if (detectedProtocol > 0) detectedProtocol else null,
+                    protocolVersionOverride = overrideProtocol,
                     knownVersionName = detectedVersionName,
                     knownIsSnapshot = detectedIsSnapshot,
                     scope = coroutineScope
@@ -202,7 +200,13 @@ class MindcraftBotEngine(
                 // Greet players in server chat
                 coroutineScope.launch(Dispatchers.IO) {
                     delay(1200)
-                    protocolClient.sendChatMessage("Mindcraft AI Bot online! Type !help or chat with me.")
+                    val wrote = protocolClient.sendChatMessage("Mindcraft bot session is ready. Type !help for supported commands.")
+                    log(
+                        if (wrote) LogLevel.INFO else LogLevel.WARN,
+                        LogCategory.CHAT,
+                        if (wrote) "Greeting packet written to the local TCP socket; server-side delivery is not confirmed."
+                        else "Greeting was not written; chat transmission is unavailable."
+                    )
                 }
 
                 startChatListener(aiSettings)
@@ -250,6 +254,7 @@ class MindcraftBotEngine(
                     val pos = Position3D(x = x, y = y, z = z)
                     _botState.value = _botState.value.copy(
                         position = pos,
+                        hasPositionUpdate = true,
                         activeTask = "In-game at (${x.toInt()}, ${y.toInt()}, ${z.toInt()})"
                     )
                     log(LogLevel.SUCCESS, LogCategory.PERCEPTION, "Spawned in world at (${x.toInt()}, ${y.toInt()}, ${z.toInt()})")
@@ -272,6 +277,17 @@ class MindcraftBotEngine(
                 }
             }
 
+            launch {
+                protocolClient.protocolEvents.collect { event ->
+                    log(LogLevel.WARN, LogCategory.NETWORK, event)
+                }
+            }
+
+            protocolClient.connectionState.collect { phase ->
+                _botState.value = _botState.value.copy(protocolState = phase.name)
+                log(LogLevel.INFO, LogCategory.NETWORK, "Minecraft protocol state: $phase")
+            }
+
             protocolClient.chatMessages.collect { (sender, message) ->
                 val isSelf = sender.equals(_botState.value.botName, ignoreCase = true) || sender.equals("MindcraftBot", ignoreCase = true)
                 val chatMsg = ChatMessage(sender = sender, message = message, isBot = isSelf)
@@ -285,36 +301,37 @@ class MindcraftBotEngine(
                 val cleanMsg = message.trim()
                 when {
                     cleanMsg.equals("!help", ignoreCase = true) -> {
-                        protocolClient.sendChatMessage("[Mindcraft] Commands: !help, !coords, !status, !mine <block>, !craft <item>, or speak naturally!")
-                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !help to $sender")
+                        sendChatReply("[Mindcraft] Commands: !coords, !status, !move x y z, !mine x y z [face], !place x y z face, !stop. Crafting is not implemented.", "Help reply")
                     }
                     cleanMsg.equals("!coords", ignoreCase = true) || cleanMsg.equals("!pos", ignoreCase = true) -> {
-                        val pos = _botState.value.position
-                        protocolClient.sendChatMessage("[Mindcraft] Bot position: X=${pos.x.toInt()}, Y=${pos.y.toInt()}, Z=${pos.z.toInt()}")
-                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !coords to $sender")
+                        val state = _botState.value
+                        if (state.hasPositionUpdate) {
+                            val pos = state.position
+                            sendChatReply("[Mindcraft] Position: X=${pos.x.toInt()}, Y=${pos.y.toInt()}, Z=${pos.z.toInt()}", "Position reply")
+                        } else {
+                            sendChatReply("[Mindcraft] Position is unavailable; the server has not supplied a position packet.", "Unavailable position reply")
+                        }
                     }
                     cleanMsg.equals("!status", ignoreCase = true) -> {
                         val s = _botState.value
-                        protocolClient.sendChatMessage("[Mindcraft] Health: ${s.health}/20, Food: ${s.food}/20, Task: ${s.activeTask}")
-                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !status to $sender")
+                        sendChatReply("[Mindcraft] Connection: ${s.status}. Health, food and inventory are unavailable because those server packets are not decoded yet.", "Status reply")
                     }
                     cleanMsg.startsWith("!mine", ignoreCase = true) -> {
-                        val block = cleanMsg.removePrefix("!mine").trim().ifBlank { "iron_ore" }
-                        _botState.value = _botState.value.copy(activeTask = "Mining $block")
-                        addItemToInventory(block, 8)
-                        protocolClient.sendChatMessage("[Mindcraft] Started mining $block.")
-                        log(LogLevel.SUCCESS, LogCategory.ACTION, "$sender commanded mining $block")
+                        executeParsedCommand(cleanMsg.removePrefix("!"))
+                    }
+                    cleanMsg.startsWith("!move", ignoreCase = true) -> {
+                        executeParsedCommand(cleanMsg.removePrefix("!"))
+                    }
+                    cleanMsg.startsWith("!place", ignoreCase = true) -> {
+                        executeParsedCommand(cleanMsg.removePrefix("!"))
                     }
                     cleanMsg.startsWith("!craft", ignoreCase = true) -> {
-                        val item = cleanMsg.removePrefix("!craft").trim().ifBlank { "torch" }
-                        _botState.value = _botState.value.copy(activeTask = "Crafting $item")
-                        addItemToInventory(item, 4)
-                        protocolClient.sendChatMessage("[Mindcraft] Crafted $item.")
-                        log(LogLevel.SUCCESS, LogCategory.ACTION, "$sender commanded crafting $item")
+                        sendChatReply("[Mindcraft] Crafting is unsupported; no crafting action was performed.", "Unsupported crafting reply")
+                        log(LogLevel.WARN, LogCategory.ACTION, "$sender requested crafting, but no real crafting action is available.")
                     }
                     cleanMsg.equals("!stop", ignoreCase = true) -> {
                         _botState.value = _botState.value.copy(activeTask = "Standing by")
-                        protocolClient.sendChatMessage("[Mindcraft] Tasks halted. Standing by.")
+                        sendChatReply("[Mindcraft] Automation paused. No gameplay action was performed.", "Stop reply")
                         log(LogLevel.INFO, LogCategory.ACTION, "$sender requested stop")
                     }
                     else -> {
@@ -377,7 +394,15 @@ class MindcraftBotEngine(
 
             // Send to real server over TCP if connected
             if (_botState.value.isRealTcpConnected) {
-                protocolClient.sendChatMessage(message)
+                val wrote = protocolClient.sendChatMessage(message)
+                log(
+                    if (wrote) LogLevel.INFO else LogLevel.WARN,
+                    LogCategory.CHAT,
+                    if (wrote) "Chat packet written to the local TCP socket; server-side delivery is not confirmed."
+                    else "Chat packet was not transmitted."
+                )
+            } else {
+                log(LogLevel.WARN, LogCategory.CHAT, "Chat was kept locally; bot is not connected to a Minecraft server.")
             }
 
             // If AI is enabled, process instruction and have the bot reply & execute commands
@@ -414,19 +439,24 @@ class MindcraftBotEngine(
                     log(LogLevel.INFO, LogCategory.CHAT, "<${_botState.value.botName}> ${aiResponse.chatMessage}")
 
                     if (_botState.value.isRealTcpConnected) {
-                        protocolClient.sendChatMessage(aiResponse.chatMessage)
+                        val wrote = protocolClient.sendChatMessage(aiResponse.chatMessage)
+                        log(
+                            if (wrote) LogLevel.INFO else LogLevel.WARN,
+                            LogCategory.CHAT,
+                            if (wrote) "AI reply packet written to the local TCP socket; server-side delivery is not confirmed."
+                            else "AI reply was not transmitted to the local TCP socket."
+                        )
                     }
                 }
 
-                for (command in aiResponse.commands) {
-                    executeParsedCommand(command)
-                    delay(700)
+                if (aiResponse.commands.isNotEmpty()) {
+                    aiResponse.commands.forEach { command -> executeParsedCommand(command) }
                 }
 
                 _botState.value = _botState.value.copy(
                     telemetry = _botState.value.telemetry.copy(
                         aiQueriesMade = _botState.value.telemetry.aiQueriesMade + 1,
-                        actionsExecuted = _botState.value.telemetry.actionsExecuted + aiResponse.commands.size
+                        actionsExecuted = _botState.value.telemetry.actionsExecuted
                     )
                 )
             } else {
@@ -440,52 +470,82 @@ class MindcraftBotEngine(
     }
 
     private suspend fun executeParsedCommand(command: String) {
-        val trimmed = command.trim()
-        val current = _botState.value
-
-        when {
-            trimmed.startsWith("!goTo") -> {
-                val dx = Random.nextDouble(-3.0, 3.0)
-                val dz = Random.nextDouble(-3.0, 3.0)
-                val newPos = current.position.copy(
-                    x = (current.position.x + dx * 8).coerceIn(-1000.0, 1000.0),
-                    z = (current.position.z + dz * 8).coerceIn(-1000.0, 1000.0)
-                )
-                _botState.value = current.copy(
-                    position = newPos,
-                    activeTask = "Moving to (${newPos.x.toInt()}, ${newPos.y.toInt()}, ${newPos.z.toInt()})"
-                )
-                log(LogLevel.INFO, LogCategory.ACTION, "Navigating to (${newPos.x.toInt()}, ${newPos.y.toInt()}, ${newPos.z.toInt()})")
+        val parts = command.trim().split(Regex("\\s+"))
+        val action = parts.firstOrNull()?.lowercase().orEmpty()
+        val values = parts.drop(1)
+        val result = when (action) {
+            "move" -> {
+                if (values.size != 3) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Usage: !move <x> <y> <z>")
+                    return
+                }
+                val x = values[0].toDoubleOrNull()
+                val y = values[1].toDoubleOrNull()
+                val z = values[2].toDoubleOrNull()
+                if (x == null || y == null || z == null) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Move command requires three numeric coordinates.")
+                    return
+                }
+                protocolClient.walkToCoordinates(x, y, z)
             }
-            trimmed.startsWith("!mine") -> {
-                val blockName = trimmed.substringAfter("(").substringBefore(",").substringBefore(")").trim()
-                val count = trimmed.substringAfter(",").substringBefore(")").trim().toIntOrNull() ?: 1
-                _botState.value = current.copy(activeTask = "Mining $count $blockName")
-                log(LogLevel.SUCCESS, LogCategory.ACTION, "Mined $count $blockName.")
-                addItemToInventory(blockName, count)
+            "mine" -> {
+                if (values.size !in 3..4) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Usage: !mine <x> <y> <z> [face]")
+                    return
+                }
+                val x = values[0].toIntOrNull()
+                val y = values[1].toIntOrNull()
+                val z = values[2].toIntOrNull()
+                val face = values.getOrNull(3)?.toIntOrNull() ?: 1
+                if (x == null || y == null || z == null) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Mine command requires integer block coordinates.")
+                    return
+                }
+                protocolClient.mineBlock(x, y, z, face)
             }
-            trimmed.startsWith("!craft") -> {
-                val item = trimmed.substringAfter("(").substringBefore(",").substringBefore(")").trim()
-                _botState.value = current.copy(activeTask = "Crafting $item")
-                log(LogLevel.SUCCESS, LogCategory.ACTION, "Crafted $item.")
-                addItemToInventory(item, 1)
-            }
-            trimmed.startsWith("!defendFrom") || trimmed.startsWith("!attack") -> {
-                val target = trimmed.substringAfter("(").substringBefore(")").trim()
-                _botState.value = current.copy(activeTask = "Defending against $target")
-                log(LogLevel.WARN, LogCategory.COMBAT, "Engaged $target with sword.")
-            }
-            trimmed.startsWith("!eat") -> {
-                val foodItem = trimmed.substringAfter("(").substringBefore(")").trim()
-                val newFood = minOf(20, current.food + 4)
-                val newHealth = minOf(20, current.health + 2)
-                _botState.value = current.copy(food = newFood, health = newHealth, activeTask = "Eating $foodItem")
-                log(LogLevel.SUCCESS, LogCategory.ACTION, "Ate $foodItem. Food: $newFood/20, Health: $newHealth/20.")
+            "place" -> {
+                if (values.size != 4) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Usage: !place <x> <y> <z> <face>")
+                    return
+                }
+                val x = values[0].toIntOrNull()
+                val y = values[1].toIntOrNull()
+                val z = values[2].toIntOrNull()
+                val face = values[3].toIntOrNull()
+                if (x == null || y == null || z == null || face == null) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Place command requires integer coordinates and face 0-5.")
+                    return
+                }
+                protocolClient.placeBlock(x, y, z, face)
             }
             else -> {
-                log(LogLevel.INFO, LogCategory.ACTION, "Action: $trimmed")
+                log(LogLevel.WARN, LogCategory.ACTION, "Unsupported game command '$command'. No action was sent.")
+                return
             }
         }
+        if (result) {
+            _botState.value = _botState.value.copy(
+                telemetry = _botState.value.telemetry.copy(
+                    actionsExecuted = _botState.value.telemetry.actionsExecuted + 1
+                )
+            )
+        }
+        log(
+            if (result) LogLevel.INFO else LogLevel.WARN,
+            LogCategory.ACTION,
+            if (result) "Action packet(s) written for '$command'. Server-side success is not yet confirmed."
+            else "Action '$command' was not sent. Check connection, current position, reach, and command syntax."
+        )
+    }
+
+    private suspend fun sendChatReply(message: String, context: String) {
+        val written = protocolClient.sendChatMessage(message)
+        log(
+            if (written) LogLevel.INFO else LogLevel.WARN,
+            LogCategory.CHAT,
+            if (written) "$context packet written to the local TCP socket; server-side delivery is not confirmed."
+            else "$context packet was not written to the local TCP socket."
+        )
     }
 
     private fun startLoops(aiSettings: AiSettings) {
@@ -564,7 +624,7 @@ class MindcraftBotEngine(
                     activeTask = "In-game session restored"
                 )
                 delay(1000L)
-                protocolClient.sendChatMessage("[Mindcraft] Bot reconnected.")
+                sendChatReply("[Mindcraft] Bot connection restored.", "Reconnect reply")
                 startChatListener(aiSettings)
                 startLoops(aiSettings)
             } else {
@@ -597,7 +657,7 @@ class MindcraftBotEngine(
             val stackSnippet = sw.toString().take(250)
 
             val current = _botState.value
-            val strategy = recoveryAction ?: "Auto-remediation applied."
+            val strategy = recoveryAction ?: "No automatic remediation was performed."
 
             log(LogLevel.ERROR, LogCategory.ERROR_WATCHDOG, "[$errorType]: $message")
 
@@ -608,7 +668,7 @@ class MindcraftBotEngine(
                 botCoordinates = "(${current.position.x.toInt()}, ${current.position.y.toInt()}, ${current.position.z.toInt()})",
                 currentGoal = current.currentGoal,
                 recoveryStrategyApplied = strategy,
-                isResolved = true
+                isResolved = false
             )
             database.errorReportDao().insertErrorReport(report)
 
@@ -635,16 +695,20 @@ class MindcraftBotEngine(
 
     private fun buildMindcraftPrompt(userGoal: String): String {
         val state = _botState.value
-        val invSummary = state.inventory.joinToString(", ") { "${it.displayName} x${it.count}" }
 
         return """
         Minecraft Bot: ${state.botName}
-        Health: ${state.health}/20, Food: ${state.food}/20
-        Position: (X: ${state.position.x.toInt()}, Y: ${state.position.y.toInt()}, Z: ${state.position.z.toInt()})
-        Inventory: [$invSummary]
+        Health and food: unavailable (not decoded yet).
+        Position: ${state.position.x}, ${state.position.y}, ${state.position.z} (server position packet, if received).
+        Inventory and nearby block state: unavailable (not decoded yet).
+        Available protocol-767 action commands:
+        - move <x> <y> <z>: sends one absolute position/rotation packet; this is not pathfinding and server acceptance is not confirmed.
+        - mine <x> <y> <z> [face]: sends start/finish dig packets only when a server position is known and the target is within reach.
+        - place <x> <y> <z> <face>: sends a use-item-on packet only when a server position is known and the target is within reach.
+        Do not invent coordinates, inventory, block state, or claim that an action succeeded. Only use actions when the user provided a target or the target is known from decoded world data.
         User Instruction: "$userGoal"
 
-        Output your reasoning thoughts, followed by commands (e.g. !goTo, !mine, !craft, !defendFrom, !eat).
+        Return a concise plan and supported action commands only. Clearly say when required world data is unavailable.
         """.trimIndent()
     }
 
@@ -658,37 +722,6 @@ class MindcraftBotEngine(
             )
         )
     }
-
-    private fun addItemToInventory(name: String, count: Int) {
-        val current = _botState.value
-        val existingIndex = current.inventory.indexOfFirst { it.displayName.equals(name, ignoreCase = true) }
-        val updated = current.inventory.toMutableList()
-
-        if (existingIndex >= 0) {
-            val item = updated[existingIndex]
-            updated[existingIndex] = item.copy(count = item.count + count)
-        } else {
-            updated.add(
-                InventoryItem(
-                    slot = updated.size,
-                    itemId = name.lowercase().replace(" ", "_"),
-                    displayName = name.replaceFirstChar { it.uppercase() },
-                    count = count
-                )
-            )
-        }
-        _botState.value = current.copy(inventory = updated)
-    }
-
-    private fun createDefaultInventory(): List<InventoryItem> = listOf(
-        InventoryItem(0, "diamond_pickaxe", "Diamond Pickaxe", 1),
-        InventoryItem(1, "iron_sword", "Iron Sword", 1),
-        InventoryItem(2, "iron_axe", "Iron Axe", 1),
-        InventoryItem(3, "torch", "Torch", 32),
-        InventoryItem(4, "cooked_beef", "Cooked Beef", 16),
-        InventoryItem(5, "oak_planks", "Oak Planks", 48),
-        InventoryItem(6, "cobblestone", "Cobblestone", 64)
-    )
 
     private fun isThrottleError(message: String): Boolean {
         val lower = message.lowercase()

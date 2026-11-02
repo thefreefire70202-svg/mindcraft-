@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,11 +58,112 @@ data class ConnectResult(
 )
 
 enum class ProtocolState {
-    HANDSHAKE,
-    STATUS,
-    LOGIN,
+    TCP_CONNECTED,
+    HANDSHAKE_SENT,
+    LOGIN_STARTED,
+    LOGIN_SUCCESS,
     CONFIGURATION,
-    PLAY
+    PLAY_READY,
+    DISCONNECTED,
+    ERROR
+}
+
+/**
+ * Packet IDs sourced from the versioned PrismarineJS minecraft-data schema.
+ * This client intentionally enables only protocol 767 (Java 1.21/1.21.1)
+ * until additional versions have complete packet definitions and test coverage.
+ */
+private data class ProtocolPacketIds(
+    val loginStart: Int,
+    val loginSuccess: Int,
+    val loginDisconnect: Int,
+    val loginEncryptionRequest: Int,
+    val loginCompression: Int,
+    val loginPluginRequest: Int,
+    val loginCookieRequest: Int,
+    val loginAcknowledged: Int,
+    val loginPluginResponse: Int,
+    val loginCookieResponse: Int,
+    val configCookieRequest: Int,
+    val configPluginMessage: Int,
+    val configDisconnect: Int,
+    val configFinish: Int,
+    val configKeepAlive: Int,
+    val configPing: Int,
+    val configKnownPacks: Int,
+    val configClientInformation: Int,
+    val configCookieResponse: Int,
+    val configPluginResponse: Int,
+    val configFinishAck: Int,
+    val configKeepAliveResponse: Int,
+    val configPong: Int,
+    val configSelectKnownPacks: Int,
+    val playKeepAlive: Int,
+    val playPing: Int,
+    val playPlayerChat: Int,
+    val playPosition: Int,
+    val playSystemChat: Int,
+    val playBlockUpdate: Int,
+    val playDisconnect: Int,
+    val playStartConfiguration: Int,
+    val playConfigurationAcknowledged: Int,
+    val playTeleportConfirm: Int,
+    val playChatMessage: Int,
+    val playKeepAliveResponse: Int,
+    val playPositionRotation: Int,
+    val playBlockDig: Int,
+    val playBlockPlace: Int,
+    val playPong: Int,
+    val playClientInformation: Int
+)
+
+private object ProtocolPacketRegistry {
+    fun forProtocol(protocol: Int): ProtocolPacketIds? = when (protocol) {
+        767 -> ProtocolPacketIds(
+            loginStart = 0x00,
+            loginSuccess = 0x02,
+            loginDisconnect = 0x00,
+            loginEncryptionRequest = 0x01,
+            loginCompression = 0x03,
+            loginPluginRequest = 0x04,
+            loginCookieRequest = 0x05,
+            loginAcknowledged = 0x03,
+            loginPluginResponse = 0x02,
+            loginCookieResponse = 0x04,
+            configCookieRequest = 0x00,
+            configPluginMessage = 0x01,
+            configDisconnect = 0x02,
+            configFinish = 0x03,
+            configKeepAlive = 0x04,
+            configPing = 0x05,
+            configKnownPacks = 0x0E,
+            configClientInformation = 0x00,
+            configCookieResponse = 0x01,
+            configPluginResponse = 0x02,
+            configFinishAck = 0x03,
+            configKeepAliveResponse = 0x04,
+            configPong = 0x05,
+            configSelectKnownPacks = 0x07,
+            playKeepAlive = 0x26,
+            playPing = 0x35,
+            playPlayerChat = 0x39,
+            playPosition = 0x40,
+            playSystemChat = 0x6C,
+            playBlockUpdate = 0x09,
+            playDisconnect = 0x1D,
+            playStartConfiguration = 0x69,
+            playConfigurationAcknowledged = 0x0C,
+            playTeleportConfirm = 0x00,
+            playChatMessage = 0x06,
+            playKeepAliveResponse = 0x18,
+            playPositionRotation = 0x1B,
+            playBlockDig = 0x24,
+            playBlockPlace = 0x38,
+            playPong = 0x2D,
+            playClientInformation = 0x0E
+        )
+        else -> null
+    }
 }
 
 class MinecraftProtocolClient {
@@ -70,13 +172,24 @@ class MinecraftProtocolClient {
     private var outputStream: OutputStream? = null
     private var isConnected = false
     private var compressionThreshold = -1
-    private var currentState = ProtocolState.HANDSHAKE
+    private var currentState = ProtocolState.DISCONNECTED
+    private val _connectionState = kotlinx.coroutines.flow.MutableStateFlow(ProtocolState.DISCONNECTED)
+    val connectionState: kotlinx.coroutines.flow.StateFlow<ProtocolState> = _connectionState.asStateFlow()
     private var packetListenerJob: Job? = null
+    private var lastPlayerPosition: Triple<Double, Double, Double>? = null
+    private var blockChangeSequence: Int = 0
+    @Volatile private var lastPlayerYaw: Float = 0f
+    @Volatile private var lastPlayerPitch: Float = 0f
+
+    private fun setConnectionState(state: ProtocolState) {
+        currentState = state
+        _connectionState.value = state
+    }
 
     private val protocolCache = ConcurrentHashMap<String, CachedServerProtocol>()
     private val lastContactTimestamps = ConcurrentHashMap<String, Long>()
 
-    var currentProtocolVersion: Int = 765
+    var currentProtocolVersion: Int = 0
         private set
     var currentVersionName: String = "Auto-Detect"
         private set
@@ -90,21 +203,58 @@ class MinecraftProtocolClient {
     private val _disconnectEvent = MutableSharedFlow<String>(replay = 1)
     val disconnectEvent: SharedFlow<String> = _disconnectEvent.asSharedFlow()
 
+    private val _protocolEvents = MutableSharedFlow<String>(extraBufferCapacity = 32)
+    val protocolEvents: SharedFlow<String> = _protocolEvents.asSharedFlow()
+
+    private val confirmedBlockStates = ConfirmedBlockStateStore()
+    private val _blockUpdates = MutableSharedFlow<ServerBlockUpdate>(extraBufferCapacity = 128)
+    /** Individual block states received from the server; this is not a full chunk snapshot. */
+    val blockUpdates: SharedFlow<ServerBlockUpdate> = _blockUpdates.asSharedFlow()
+
+    fun confirmedBlockStateId(position: BlockPos): Int? = confirmedBlockStates.stateIdAt(position)
+
     companion object {
+        private const val MAX_PACKET_SIZE = 2 * 1024 * 1024
+
+        /** Common default ports for Bedrock Dedicated Server; this is a hint, not proof of server edition. */
+        fun isLikelyBedrockPort(port: Int): Boolean = port == 19132 || port == 19133
+
+        /** Auto mode may probe our implemented 1.21.1 client against any unimplemented advertised version. */
+        fun shouldAttemptProtocol767Compatibility(detectedProtocol: Int, protocolVersionOverride: Int?): Boolean =
+            protocolVersionOverride == null && detectedProtocol > 0 && detectedProtocol != 767
+
         fun parseHostAndPort(rawHost: String, defaultPort: Int = 25565): Pair<String, Int> {
             val clean = rawHost.trim()
-                .removePrefix("http://")
-                .removePrefix("https://")
-                .removePrefix("minecraft://")
-                .trimEnd('/')
-            return if (clean.contains(":")) {
-                val parts = clean.split(":")
-                val h = parts[0].trim()
-                val p = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: defaultPort
-                Pair(h, p)
-            } else {
-                Pair(clean, defaultPort)
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .removePrefix("minecraft://")
+            .trimEnd('/')
+        require(defaultPort in 1..65535) { "Port must be between 1 and 65535." }
+
+        if (clean.startsWith("[")) {
+            val closingBracket = clean.indexOf(']')
+            require(closingBracket > 1) { "Invalid bracketed IPv6 address." }
+            val host = clean.substring(1, closingBracket)
+            val suffix = clean.substring(closingBracket + 1)
+            val port = if (suffix.isBlank()) defaultPort else {
+                require(suffix.startsWith(":")) { "Expected :port after bracketed IPv6 address." }
+                suffix.drop(1).toIntOrNull()?.also { require(it in 1..65535) }
+                    ?: throw IllegalArgumentException("Invalid server port.")
             }
+            return Pair(host, port)
+        }
+
+        val colonCount = clean.count { it == ':' }
+        if (colonCount > 1) return Pair(clean, defaultPort)
+        if (colonCount == 1) {
+            val separator = clean.lastIndexOf(':')
+            val host = clean.substring(0, separator).trim()
+            val port = clean.substring(separator + 1).trim().toIntOrNull()
+                ?: throw IllegalArgumentException("Invalid server port.")
+            require(host.isNotBlank() && port in 1..65535) { "Invalid server host or port." }
+            return Pair(host, port)
+        }
+        return Pair(clean, defaultPort)
         }
     }
 
@@ -150,10 +300,10 @@ class MinecraftProtocolClient {
                 val outStream = s.getOutputStream()
 
                 // 1. Send Handshake Packet (ID: 0x00, NextState: 1 = Status)
-                // Use protocol 767 (Minecraft 1.21.1) which modern servers (Purpur/Paper/Aternos/Velocity) accept without rejecting
+                // Status handshake protocol -1 is version-independent; the server reports its actual protocol in the JSON response.
                 val handshakeBytes = ByteArrayOutputStream()
                 writeVarInt(handshakeBytes, 0x00) // Packet ID
-                writeVarInt(handshakeBytes, 767)  // Protocol 767 (1.21.1 standard for status ping)
+                writeVarInt(handshakeBytes, -1)  // Unknown protocol for version-independent status ping
                 writeString(handshakeBytes, host) // Server hostname
                 handshakeBytes.write((port shr 8) and 0xFF)
                 handshakeBytes.write(port and 0xFF)
@@ -169,24 +319,18 @@ class MinecraftProtocolClient {
                 // 3. Read Status Response Packet
                 val packetLength = readVarInt(inStream)
                 val packetId = readVarInt(inStream)
+                if (packetId != 0x00) {
+                    throw IllegalStateException("Unexpected server status packet ID: $packetId")
+                }
                 val jsonResponse = readString(inStream)
 
                 val ping = System.currentTimeMillis() - startTime
-
-                // 4. Send Ping Request Packet (ID: 0x01) with timestamp to cleanly complete SLP exchange
-                try {
-                    val pingReq = ByteArrayOutputStream()
-                    writeVarInt(pingReq, 0x01)
-                    val pbb = ByteBuffer.allocate(8).putLong(System.currentTimeMillis())
-                    pingReq.write(pbb.array())
-                    sendRawPacket(outStream, pingReq.toByteArray())
-                } catch (_: Exception) {}
 
                 // Parse Server JSON response
                 val json = JSONObject(jsonResponse)
                 val versionObj = json.optJSONObject("version")
                 val versionName = versionObj?.optString("name", "Minecraft Server") ?: "Minecraft Server"
-                val protocolVer = versionObj?.optInt("protocol", 767) ?: 767
+                val protocolVer = versionObj?.optInt("protocol", 0) ?: 0
 
                 val playersObj = json.optJSONObject("players")
                 val onlinePlayers = playersObj?.optInt("online", 0) ?: 0
@@ -195,6 +339,12 @@ class MinecraftProtocolClient {
                 val descObj = json.opt("description")
                 val motd = parseDescription(descObj)
 
+                if (protocolVer <= 0) {
+                    return@withContext ServerStatusResult(
+                        isOnline = false,
+                        error = "Server status response did not include a valid protocol version."
+                    )
+                }
                 val snapshot = isSnapshotVersion(versionName, protocolVer)
 
                 setCachedProtocol(host, port, protocolVer, versionName, snapshot)
@@ -213,6 +363,8 @@ class MinecraftProtocolClient {
             } catch (e: Exception) {
                 lastContactTimestamps["$host:$port"] = System.currentTimeMillis()
                 val friendlyError = when {
+                    isLikelyBedrockPort(port) ->
+                        "Port $port is commonly used by Minecraft Bedrock Edition (UDP). This app currently supports Java Edition over TCP, not Bedrock. If your server is Java Edition, confirm that you entered its Java TCP port."
                     e is java.net.UnknownHostException -> "Could not resolve hostname '$host'. Check server address."
                     e is java.net.ConnectException -> "Connection refused. Server may be offline (start it in your Aternos panel) or port $port is closed."
                     e is java.net.SocketTimeoutException -> "Connection timed out after ${timeoutMs}ms. Server may be offline or starting up."
@@ -226,7 +378,9 @@ class MinecraftProtocolClient {
             } finally {
                 try {
                     s?.close()
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    _protocolEvents.tryEmit("Status socket cleanup failed: ${e.message ?: e.javaClass.simpleName}")
+                }
             }
         }
 
@@ -271,32 +425,78 @@ class MinecraftProtocolClient {
             }
         }
 
-        // 2. If protocol is still unknown, default directly to 767 (1.21.1)
-        // DO NOT open a second status socket here, as that triggers connection-throttle!
+        // A direct join still needs real version detection. Never guess a protocol.
         if (detectedProtocol <= 0) {
-            detectedProtocol = 767
-            detectedName = "1.21.x"
+            val status = queryServerStatus(host, port, timeoutMs.coerceAtLeast(7500))
+            if (!status.isOnline || status.protocolVersion <= 0) {
+                setConnectionState(ProtocolState.ERROR)
+                val bedrockPortHint = when {
+                    isLikelyBedrockPort(port) -> " Port $port is commonly used by Minecraft Bedrock Edition (UDP). This app currently implements Minecraft Java Edition over TCP, so it cannot join a Bedrock server. Use the server's Java Edition address and Java port, or a Java-to-Bedrock proxy that exposes a Java TCP endpoint."
+                    else -> ""
+                }
+                val statusReason = status.error ?: "The server did not provide a valid Java Edition status response."
+                return@withContext ConnectResult(
+                    isSuccess = false,
+                    message = "Java Edition server detection failed: $statusReason$bedrockPortHint No login packet was sent. If this is a Java server, verify that its Java TCP port is open and select its exact protocol version only if you know it.",
+                    protocolVersionUsed = 0,
+                    versionName = "Unknown",
+                    isSnapshot = false,
+                    exception = IllegalStateException(statusReason)
+                )
+            }
+            detectedProtocol = status.protocolVersion
+            detectedName = status.versionName
+            isSnapshot = status.isSnapshot
+            setCachedProtocol(host, port, detectedProtocol, detectedName, isSnapshot)
+        }
+
+        val packetIds = ProtocolPacketRegistry.forProtocol(detectedProtocol)
+        if (packetIds == null) {
+            // Proxies can report either an older backend version (e.g. 340) or a newer
+            // frontend version (e.g. 777). In auto mode, probe the one real packet registry
+            // we implement. Never treat the advertised version as if we implemented it.
+            if (shouldAttemptProtocol767Compatibility(detectedProtocol, protocolVersionOverride)) {
+                val compatibility = performLoginHandshake(
+                    host, port, username, 767,
+                    "Java 1.21.1 (protocol 767 compatibility attempt; server advertised $detectedProtocol)",
+                    false, timeoutMs, scope
+                )
+                if (compatibility.isSuccess) {
+                    currentProtocolVersion = 767
+                    currentVersionName = "Java 1.21.1 (compatibility via server proxy)"
+                    _protocolEvents.tryEmit(
+                        "Server advertised protocol $detectedProtocol; login succeeded using protocol 767. " +
+                            "The server/proxy accepted the 1.21.1 client protocol."
+                    )
+                    return@withContext compatibility.copy(
+                        message = "Connected using protocol 767 compatibility. The server advertised protocol $detectedProtocol; a compatible proxy appears to be translating the connection."
+                    )
+                }
+                setConnectionState(ProtocolState.ERROR)
+                return@withContext compatibility.copy(
+                    message = "Server status advertises protocol $detectedProtocol ($detectedName), which this build does not implement. " +
+                        "An automatic Java 1.21.1/protocol 767 compatibility attempt was also rejected: " + compatibility.message +
+                        ". The server must accept Java 1.21.1 clients through ViaVersion/ViaBackwards or an equivalent proxy. " +
+                        "This app does not yet implement protocol $detectedProtocol."
+                )
+            }
+
+            setConnectionState(ProtocolState.ERROR)
+            return@withContext ConnectResult(
+                isSuccess = false,
+                message = "Minecraft protocol $detectedProtocol ($detectedName) is not supported by this build. Only protocol 767 has a packet registry; no login packet was sent. Select a server that accepts Java 1.21.1 clients, or enable ViaVersion/compatible proxy support on the server.",
+                protocolVersionUsed = detectedProtocol,
+                versionName = detectedName,
+                isSnapshot = isSnapshot,
+                exception = UnsupportedOperationException("No packet registry for protocol $detectedProtocol")
+            )
         }
 
         currentProtocolVersion = detectedProtocol
         currentVersionName = detectedName
 
-        // 3. Perform connection with the auto-detected protocol
-        val attemptResult = performLoginHandshake(host, port, username, detectedProtocol, detectedName, isSnapshot, timeoutMs, scope)
-
-        // 4. If server disconnected with an "Outdated" message, extract the required version and auto-retry!
-        if (!attemptResult.isSuccess && attemptResult.message.contains("Outdated", ignoreCase = true)) {
-            val retryProtocol = extractProtocolFromDisconnectReason(attemptResult.message)
-            if (retryProtocol != null && retryProtocol != detectedProtocol) {
-                disconnect()
-                currentProtocolVersion = retryProtocol
-                currentVersionName = "Auto-corrected ($retryProtocol)"
-                setCachedProtocol(host, port, retryProtocol, currentVersionName, isSnapshot)
-                return@withContext performLoginHandshake(host, port, username, retryProtocol, currentVersionName, isSnapshot, timeoutMs, scope)
-            }
-        }
-
-        attemptResult
+        // 3. Perform connection with the version-specific packet registry
+        performLoginHandshake(host, port, username, detectedProtocol, detectedName, isSnapshot, timeoutMs, scope)
     }
 
     private fun performLoginHandshake(
@@ -314,9 +514,6 @@ class MinecraftProtocolClient {
             val s = Socket()
             s.tcpNoDelay = true
             s.keepAlive = true
-            try {
-                s.trafficClass = 0x10 // IPTOS_LOWDELAY
-            } catch (_: Exception) {}
             s.soTimeout = timeoutMs
             s.connect(InetSocketAddress(targetHost, port), timeoutMs)
             socket = s
@@ -324,25 +521,27 @@ class MinecraftProtocolClient {
             outputStream = s.getOutputStream()
             isConnected = true
             compressionThreshold = -1
-            currentState = ProtocolState.HANDSHAKE
+            setConnectionState(ProtocolState.TCP_CONNECTED)
             lastContactTimestamps["$host:$port"] = System.currentTimeMillis()
 
             // 1. Send Handshake Packet with NextState = 2 (Login)
             val handshakeBytes = ByteArrayOutputStream()
             writeVarInt(handshakeBytes, 0x00) // Packet ID
-            writeVarInt(handshakeBytes, protocol) // Auto-detected protocol (e.g. 767 for 1.21.1)
+            writeVarInt(handshakeBytes, protocol) // Auto-detected protocol from the detected server version
             writeString(handshakeBytes, host)
             handshakeBytes.write((port shr 8) and 0xFF)
             handshakeBytes.write(port and 0xFF)
             writeVarInt(handshakeBytes, 2) // Next State = 2 (Login)
 
             sendRawPacket(outputStream!!, handshakeBytes.toByteArray())
-            currentState = ProtocolState.LOGIN
+            setConnectionState(ProtocolState.HANDSHAKE_SENT)
 
             // 2. Send Login Start Packet (Packet ID 0x00 in Login State)
             val offlineUuid = UUID.nameUUIDFromBytes("OfflinePlayer:$username".toByteArray(StandardCharsets.UTF_8))
             val loginBytes = ByteArrayOutputStream()
-            writeVarInt(loginBytes, 0x00)
+            val packetIds = ProtocolPacketRegistry.forProtocol(protocol)
+                ?: throw UnsupportedOperationException("Protocol $protocol has no packet registry")
+            writeVarInt(loginBytes, packetIds.loginStart)
             writeString(loginBytes, username)
 
             if (protocol >= 764) {
@@ -362,21 +561,40 @@ class MinecraftProtocolClient {
             }
 
             sendProtocolPacket(loginBytes.toByteArray())
+            setConnectionState(ProtocolState.LOGIN_STARTED)
 
             // 3. Read Login Response packets until Login Success (0x02) or error
             var loginSuccess = false
             var loginResult: ConnectResult? = null
 
-            while (!loginSuccess && isCurrentlyConnected()) {
+            while ((!loginSuccess || currentState != ProtocolState.PLAY_READY) && isCurrentlyConnected()) {
                 val (packetId, payload) = readNextPacket()
 
+                // Login Success is not a completed session on 1.20.2+.
+                // Keep consuming Configuration packets until the server sends Finish Configuration.
+                if (loginSuccess && protocol >= 764) {
+                    handleConfigurationPacket(packetId, payload, protocol)
+                    if (currentState == ProtocolState.PLAY_READY) {
+                        loginResult = ConnectResult(
+                            isSuccess = true,
+                            message = "Joined $versionName server (Protocol: $protocol) as '$username'. Configuration completed.",
+                            protocolVersionUsed = protocol,
+                            versionName = versionName,
+                            isSnapshot = isSnapshot
+                        )
+                        break
+                    }
+                    continue
+                }
+
                 when (packetId) {
-                    0x00 -> {
+                    packetIds.loginDisconnect -> {
                         // Disconnected by server
                         val reasonStream = ByteArrayInputStream(payload)
                         val rawReason = readString(reasonStream)
                         val cleanReason = parseDisconnectReason(rawReason)
                         disconnect()
+                        setConnectionState(ProtocolState.ERROR)
                         loginResult = ConnectResult(
                             isSuccess = false,
                             message = cleanReason,
@@ -387,9 +605,10 @@ class MinecraftProtocolClient {
                         )
                         break
                     }
-                    0x01 -> {
+                    packetIds.loginEncryptionRequest -> {
                         // Encryption Request (Server requires premium Mojang auth / online-mode=true)
                         disconnect()
+                        setConnectionState(ProtocolState.ERROR)
                         loginResult = ConnectResult(
                             isSuccess = false,
                             isOnlineModeRestricted = true,
@@ -400,83 +619,83 @@ class MinecraftProtocolClient {
                         )
                         break
                     }
-                    0x02 -> {
-                        // Login Success!
+                    packetIds.loginSuccess -> {
+                        // Login Success. Modern protocol versions must finish Configuration before success.
                         loginSuccess = true
+                        setConnectionState(ProtocolState.LOGIN_SUCCESS)
                         if (protocol >= 764) {
-                            // In 1.20.2+, acknowledge login to transition to Configuration phase
-                            try {
-                                val ackBytes = ByteArrayOutputStream()
-                                writeVarInt(ackBytes, 0x03) // Login Acknowledged
-                                sendProtocolPacket(ackBytes.toByteArray())
-                                currentState = ProtocolState.CONFIGURATION
-
-                                // Send Client Information in Configuration phase (packet 0x00)
-                                sendClientInformation(isConfigurationState = true)
-                            } catch (_: Exception) {}
+                            val ackBytes = ByteArrayOutputStream()
+                            writeVarInt(ackBytes, packetIds.loginAcknowledged) // Serverbound Login Acknowledged
+                            sendProtocolPacket(ackBytes.toByteArray())
+                            setConnectionState(ProtocolState.CONFIGURATION)
+                            sendClientInformation(isConfigurationState = true)
+                            socket?.soTimeout = 45000
                         } else {
-                            currentState = ProtocolState.PLAY
+                            setConnectionState(ProtocolState.PLAY_READY)
+                            socket?.soTimeout = 45000
+                            loginResult = ConnectResult(
+                                isSuccess = true,
+                                message = "Joined $versionName server (Protocol: $protocol) as '$username'.",
+                                protocolVersionUsed = protocol,
+                                versionName = versionName,
+                                isSnapshot = isSnapshot
+                            )
+                            break
                         }
-
-                        // Set socket read timeout to 45 seconds (TCP keepalive / watchdog)
-                        socket?.soTimeout = 45000
-
-                        // Start background packet handler to answer Keep-Alive & read Chat
-                        if (scope != null) {
-                            startPacketListenerLoop(scope, protocol)
-                        }
-
-                        loginResult = ConnectResult(
-                            isSuccess = true,
-                            message = "Joined $versionName server (Protocol: $protocol${if (isSnapshot) " [Snapshot]" else ""}) as '$username'.",
-                            protocolVersionUsed = protocol,
-                            versionName = versionName,
-                            isSnapshot = isSnapshot
-                        )
-                        break
                     }
-                    0x03 -> {
+                    packetIds.loginCompression -> {
                         // Set Compression
                         val thresholdStream = ByteArrayInputStream(payload)
                         compressionThreshold = readVarInt(thresholdStream)
                     }
-                    0x04 -> {
+                    packetIds.loginPluginRequest -> {
                         // Login Plugin Request (Custom Query) -> Answer Login Plugin Response (Packet 0x02, messageId, successful = false)
-                        try {
-                            val queryStream = ByteArrayInputStream(payload)
-                            val messageId = readVarInt(queryStream)
-                            val reply = ByteArrayOutputStream()
-                            writeVarInt(reply, 0x02) // Serverbound Login Plugin Response
-                            writeVarInt(reply, messageId)
-                            reply.write(0) // successful = false
-                            sendProtocolPacket(reply.toByteArray())
-                        } catch (_: Exception) {}
+                        val queryStream = ByteArrayInputStream(payload)
+                        val messageId = readVarInt(queryStream)
+                        val channel = readString(queryStream)
+                        _protocolEvents.tryEmit("Login plugin request '$channel' was declined because plugin authentication is unsupported.")
+                        val reply = ByteArrayOutputStream()
+                        writeVarInt(reply, packetIds.loginPluginResponse)
+                        writeVarInt(reply, messageId)
+                        reply.write(0)
+                        sendProtocolPacket(reply.toByteArray())
                     }
-                    0x05 -> {
+                    packetIds.loginCookieRequest -> {
                         // Cookie Request (1.20.5+) -> Answer Cookie Response (Packet 0x04, key, hasPayload = false)
-                        try {
-                            val cookieStream = ByteArrayInputStream(payload)
-                            val key = readString(cookieStream)
-                            val reply = ByteArrayOutputStream()
-                            writeVarInt(reply, 0x04) // Serverbound Cookie Response
-                            writeString(reply, key)
-                            reply.write(0) // hasPayload = false
-                            sendProtocolPacket(reply.toByteArray())
-                        } catch (_: Exception) {}
+                        val cookieStream = ByteArrayInputStream(payload)
+                        val key = readString(cookieStream)
+                        val reply = ByteArrayOutputStream()
+                        writeVarInt(reply, packetIds.loginCookieResponse)
+                        writeString(reply, key)
+                        reply.write(0)
+                        sendProtocolPacket(reply.toByteArray())
                     }
-                    else -> {}
+                    else -> _protocolEvents.tryEmit("Received unhandled protocol 767 login packet id 0x${packetId.toString(16)}; payload was skipped.")
                 }
             }
 
-            loginResult ?: ConnectResult(
+            val completedResult = loginResult ?: ConnectResult(
                 isSuccess = false,
-                message = "Login timed out or connection closed before Login Success.",
+                message = if (loginSuccess && protocol >= 764) {
+                    "Login succeeded, but Minecraft Configuration did not complete."
+                } else {
+                    "Login timed out or connection closed before Login Success."
+                },
                 protocolVersionUsed = protocol,
                 versionName = versionName,
                 isSnapshot = isSnapshot
             )
+
+            if (completedResult.isSuccess && scope != null) {
+                startPacketListenerLoop(scope, protocol)
+            } else if (!completedResult.isSuccess) {
+                disconnect()
+                setConnectionState(ProtocolState.ERROR)
+            }
+            completedResult
         } catch (e: Exception) {
             disconnect()
+            setConnectionState(ProtocolState.ERROR)
             ConnectResult(
                 isSuccess = false,
                 message = e.localizedMessage ?: "Failed to connect to server",
@@ -489,11 +708,12 @@ class MinecraftProtocolClient {
     }
 
     fun sendClientInformation(isConfigurationState: Boolean) {
-        try {
             val bytes = ByteArrayOutputStream()
             // In CONFIGURATION state, Client Information is packet 0x00
-            // In PLAY state, Client Information is packet 0x09 (in 1.21.1) or 0x08 (in 1.20.4)
-            writeVarInt(bytes, if (isConfigurationState) 0x00 else (if (currentProtocolVersion >= 767) 0x09 else 0x08))
+            // Packet IDs are selected from the protocol-specific registry.
+            val packetIds = ProtocolPacketRegistry.forProtocol(currentProtocolVersion)
+                ?: throw UnsupportedOperationException("No client-information packet registry for protocol $currentProtocolVersion")
+            writeVarInt(bytes, if (isConfigurationState) packetIds.configClientInformation else packetIds.playClientInformation)
             writeString(bytes, "en_us")
             bytes.write(8) // view distance = 8 chunks
             writeVarInt(bytes, 0) // chat mode: 0 (enabled)
@@ -503,33 +723,11 @@ class MinecraftProtocolClient {
             bytes.write(0) // text filtering: false
             bytes.write(1) // allow server listings: true
             sendProtocolPacket(bytes.toByteArray())
-        } catch (_: Exception) {}
     }
 
     private fun startPacketListenerLoop(scope: CoroutineScope, protocol: Int) {
         packetListenerJob?.cancel()
         packetListenerJob = scope.launch(Dispatchers.IO) {
-            // Heartbeat coroutine: sends periodic on-ground packet every 2s in PLAY state to prevent server "Timed out" disconnects
-            val heartbeatJob = launch {
-                while (isActive && isCurrentlyConnected()) {
-                    delay(2000L)
-                    if (currentState == ProtocolState.PLAY && isCurrentlyConnected()) {
-                        try {
-                            val hb = ByteArrayOutputStream()
-                            val onGroundPacketId = when {
-                                protocol >= 767 -> 0x17
-                                protocol >= 764 -> 0x17
-                                protocol >= 754 -> 0x14
-                                else -> 0x03
-                            }
-                            writeVarInt(hb, onGroundPacketId)
-                            hb.write(1) // onGround = true
-                            sendProtocolPacket(hb.toByteArray())
-                        } catch (_: Exception) {}
-                    }
-                }
-            }
-
             var disconnectReason = "Connection closed normally"
             try {
                 while (isActive && isCurrentlyConnected()) {
@@ -553,7 +751,7 @@ class MinecraftProtocolClient {
                         ProtocolState.CONFIGURATION -> {
                             handleConfigurationPacket(packetId, payload, protocol)
                         }
-                        ProtocolState.PLAY -> {
+                        ProtocolState.PLAY_READY -> {
                             handlePlayPacket(packetId, payload, protocol)
                         }
                         else -> {}
@@ -562,240 +760,325 @@ class MinecraftProtocolClient {
             } catch (e: Exception) {
                 disconnectReason = "TCP error: ${e.localizedMessage}"
             } finally {
-                heartbeatJob.cancel()
                 isConnected = false
+                setConnectionState(
+                    if (disconnectReason == "Connection closed normally") ProtocolState.DISCONNECTED
+                    else ProtocolState.ERROR
+                )
+                try {
+                    socket?.close()
+                } catch (e: Exception) {
+                    _protocolEvents.tryEmit("Listener socket cleanup failed: ${e.message ?: e.javaClass.simpleName}")
+                }
+                socket = null
+                inputStream = null
+                outputStream = null
+                compressionThreshold = -1
                 _disconnectEvent.tryEmit(disconnectReason)
             }
         }
     }
 
     private fun handleConfigurationPacket(packetId: Int, payload: ByteArray, protocol: Int) {
+        val ids = ProtocolPacketRegistry.forProtocol(protocol)
+            ?: throw UnsupportedOperationException("No configuration registry for protocol $protocol")
         val stream = ByteArrayInputStream(payload)
         when (packetId) {
-            0x00 -> {
-                // In 1.20.5+ (>= 766), 0x00 can be Cookie Request
-                // In 1.20.2 - 1.20.4, 0x00 can be Disconnect
-                if (protocol >= 766) {
-                    try {
-                        val key = readString(stream)
-                        val reply = ByteArrayOutputStream()
-                        writeVarInt(reply, 0x01) // Serverbound Cookie Response (Config)
-                        writeString(reply, key)
-                        reply.write(0) // hasPayload = false
-                        sendProtocolPacket(reply.toByteArray())
-                    } catch (_: Exception) {}
-                } else {
-                    val raw = readString(stream)
-                    val clean = parseDisconnectReason(raw)
-                    disconnect()
-                    _chatMessages.tryEmit(Pair("System", "Disconnected: $clean"))
-                }
+            ids.configCookieRequest -> {
+                val key = readString(stream)
+                val reply = ByteArrayOutputStream()
+                writeVarInt(reply, ids.configCookieResponse)
+                writeString(reply, key)
+                reply.write(0)
+                sendProtocolPacket(reply.toByteArray())
             }
-            0x01 -> {
-                // In 1.20.5+ (>= 766), 0x01 is Disconnect
-                // In 1.20.2 - 1.20.4, 0x01 is Plugin Message / Custom Payload
-                if (protocol >= 766) {
-                    val raw = readString(stream)
-                    val clean = parseDisconnectReason(raw)
-                    disconnect()
-                    _chatMessages.tryEmit(Pair("System", "Disconnected: $clean"))
-                } else {
-                    handleConfigPluginMessage(stream, protocol)
-                }
+            ids.configPluginMessage -> handleConfigPluginMessage(stream, protocol)
+            ids.configDisconnect -> {
+                _protocolEvents.tryEmit("Server sent a configuration disconnect packet. Its NBT reason component is not decoded by this client.")
+                throw EOFException("Server disconnected during configuration; NBT reason decoding is unsupported.")
             }
-            0x02 -> {
-                // In 1.20.5+ (>= 766), 0x02 is Plugin Message
-                // In 1.20.2 - 1.20.4, 0x02 is Finish Configuration
-                if (protocol >= 766) {
-                    handleConfigPluginMessage(stream, protocol)
-                } else {
-                    finishConfigurationAck(protocol)
-                }
+            ids.configFinish -> finishConfigurationAck(protocol)
+            ids.configKeepAlive -> {
+                val id = readLong(stream)
+                val reply = ByteArrayOutputStream()
+                writeVarInt(reply, ids.configKeepAliveResponse)
+                writeLong(reply, id)
+                sendProtocolPacket(reply.toByteArray())
             }
-            0x03 -> {
-                // In 1.20.5+ (>= 766), 0x03 is Clientbound Finish Configuration!
-                // In 1.20.2 - 1.20.4, 0x03 is Keep Alive
-                if (protocol >= 766) {
-                    finishConfigurationAck(protocol)
-                } else {
-                    val id = readLong(stream)
-                    val reply = ByteArrayOutputStream()
-                    writeVarInt(reply, 0x03) // Serverbound Keep Alive (Config 1.20.2)
-                    writeLong(reply, id)
-                    sendProtocolPacket(reply.toByteArray())
-                }
-            }
-            0x04 -> {
-                // Clientbound Keep Alive (1.20.5+), or Ping (1.20.2 - 1.20.4)
-                if (protocol >= 766) {
-                    val id = readLong(stream)
-                    val reply = ByteArrayOutputStream()
-                    writeVarInt(reply, 0x04) // Serverbound Keep Alive (Config 1.20.5+)
-                    writeLong(reply, id)
-                    sendProtocolPacket(reply.toByteArray())
-                } else {
-                    val pingId = stream.read() or (stream.read() shl 8) or (stream.read() shl 16) or (stream.read() shl 24)
-                    val pong = ByteArrayOutputStream()
-                    writeVarInt(pong, 0x04)
-                    pong.write(pingId and 0xFF)
-                    pong.write((pingId shr 8) and 0xFF)
-                    pong.write((pingId shr 16) and 0xFF)
-                    pong.write((pingId shr 24) and 0xFF)
-                    sendProtocolPacket(pong.toByteArray())
-                }
-            }
-            0x05 -> {
-                // Clientbound Ping (1.20.5+)
-                val pingId = stream.read() or (stream.read() shl 8) or (stream.read() shl 16) or (stream.read() shl 24)
+            ids.configPing -> {
+                val pingId = readInt(stream)
                 val pong = ByteArrayOutputStream()
-                writeVarInt(pong, if (protocol >= 766) 0x05 else 0x04)
-                pong.write(pingId and 0xFF)
-                pong.write((pingId shr 8) and 0xFF)
-                pong.write((pingId shr 16) and 0xFF)
-                pong.write((pingId shr 24) and 0xFF)
+                writeVarInt(pong, ids.configPong)
+                writeInt(pong, pingId)
                 sendProtocolPacket(pong.toByteArray())
             }
-            0x07, 0x0E -> {
-                // Select Known Packs (0x0E in 1.20.5 - 1.21.x, 0x07 in 1.20.2)
-                try {
-                    val reply = ByteArrayOutputStream()
-                    writeVarInt(reply, 0x07) // Serverbound Select Known Packs
-                    writeVarInt(reply, 0) // 0 known packs
-                    sendProtocolPacket(reply.toByteArray())
-                } catch (_: Exception) {}
+            ids.configKnownPacks -> {
+                // Select no optional packs. This is a valid explicit response.
+                val reply = ByteArrayOutputStream()
+                writeVarInt(reply, ids.configSelectKnownPacks)
+                writeVarInt(reply, 0)
+                sendProtocolPacket(reply.toByteArray())
             }
+            else -> _protocolEvents.tryEmit("Received unhandled protocol 767 configuration packet id 0x${packetId.toString(16)}; payload was skipped.")
         }
     }
 
     private fun finishConfigurationAck(protocol: Int) {
-        try {
-            val finishAck = ByteArrayOutputStream()
-            // In 1.20.5+ (>= 766), Serverbound Finish Configuration is 0x03
-            // In 1.20.2 - 1.20.4 (764..765), Serverbound Finish Configuration is 0x02
-            writeVarInt(finishAck, if (protocol >= 766) 0x03 else 0x02)
-            sendProtocolPacket(finishAck.toByteArray())
-            currentState = ProtocolState.PLAY
-
-            // Send Client Information in Play state
-            sendClientInformation(isConfigurationState = false)
-        } catch (_: Exception) {}
+        val ids = ProtocolPacketRegistry.forProtocol(protocol)
+            ?: throw UnsupportedOperationException("No configuration registry for protocol $protocol")
+        val finishAck = ByteArrayOutputStream()
+        writeVarInt(finishAck, ids.configFinishAck)
+        sendProtocolPacket(finishAck.toByteArray())
+        sendClientInformation(isConfigurationState = false)
+        setConnectionState(ProtocolState.PLAY_READY)
     }
 
     private fun handleConfigPluginMessage(stream: InputStream, protocol: Int) {
-        try {
-            val channel = readString(stream)
-            if (channel == "minecraft:brand") {
-                val reply = ByteArrayOutputStream()
-                writeVarInt(reply, if (protocol >= 766) 0x02 else 0x01)
-                writeString(reply, "minecraft:brand")
-                writeString(reply, "mindcraft")
-                sendProtocolPacket(reply.toByteArray())
-            }
-        } catch (_: Exception) {}
+        val channel = readString(stream)
+        if (channel == "minecraft:brand") {
+            val ids = ProtocolPacketRegistry.forProtocol(protocol)
+                ?: throw UnsupportedOperationException("No configuration registry for protocol $protocol")
+            val reply = ByteArrayOutputStream()
+            writeVarInt(reply, ids.configPluginResponse)
+            writeString(reply, "minecraft:brand")
+            writeString(reply, "mindcraft")
+            sendProtocolPacket(reply.toByteArray())
+        }
     }
 
     private fun handlePlayPacket(packetId: Int, payload: ByteArray, protocol: Int) {
-        // 1. Synchronize Player Position
-        if (packetId in listOf(0x42, 0x40, 0x3E, 0x38, 0x3A) && payload.size >= 29) {
-            try {
-                val posStream = ByteArrayInputStream(payload)
-                val x = readDouble(posStream)
-                val y = readDouble(posStream)
-                val z = readDouble(posStream)
-                val yaw = readFloat(posStream)
-                val pitch = readFloat(posStream)
-                val flags = posStream.read()
-                val teleportId = readVarInt(posStream)
+        val ids = ProtocolPacketRegistry.forProtocol(protocol)
+            ?: throw UnsupportedOperationException("No play registry for protocol $protocol")
+        val stream = ByteArrayInputStream(payload)
+        when (packetId) {
+            ids.playPosition -> {
+                val x = readDouble(stream)
+                val y = readDouble(stream)
+                val z = readDouble(stream)
+                val yaw = readFloat(stream)
+                val pitch = readFloat(stream)
+                val flags = stream.read()
+                if (flags !in 0..255) throw EOFException("Truncated player-position flags.")
+                val teleportId = readVarInt(stream)
 
-                // Confirm Teleportation (Serverbound packet 0x00 in PLAY state)
-                val confirmBytes = ByteArrayOutputStream()
-                writeVarInt(confirmBytes, 0x00)
-                writeVarInt(confirmBytes, teleportId)
-                sendProtocolPacket(confirmBytes.toByteArray())
+                val confirm = ByteArrayOutputStream()
+                writeVarInt(confirm, ids.playTeleportConfirm)
+                writeVarInt(confirm, teleportId)
+                sendProtocolPacket(confirm.toByteArray())
 
-                // Confirm Player Position & Rotation to keep stance active
-                val posBytes = ByteArrayOutputStream()
-                writeVarInt(posBytes, if (protocol >= 767) 0x1B else 0x14)
-                writeDouble(posBytes, x)
-                writeDouble(posBytes, y)
-                writeDouble(posBytes, z)
-                writeFloat(posBytes, yaw)
-                writeFloat(posBytes, pitch)
-                posBytes.write(1) // onGround = true
-                sendProtocolPacket(posBytes.toByteArray())
-
-                _spawnPosition.tryEmit(Triple(x, y, z))
-            } catch (_: Exception) {}
-        }
-
-        // 2. Keep Alive detection across modern and legacy versions
-        val isKeepAliveId = packetId in listOf(0x26, 0x24, 0x21, 0x20, 0x1F, 0x1E, 0x27)
-        if (isKeepAliveId || (payload.size == 8 && packetId !in listOf(0x42, 0x40, 0x3E, 0x38, 0x3A))) {
-            try {
-                val keepAliveStream = ByteArrayInputStream(payload)
-                val keepAliveId = readLong(keepAliveStream)
-                val keepAliveReply = ByteArrayOutputStream()
-                val replyPacketId = when {
-                    protocol >= 767 -> 0x18
-                    protocol >= 764 -> 0x15
-                    protocol >= 761 -> 0x11
-                    protocol >= 754 -> 0x10
-                    protocol >= 340 -> 0x0B
-                    else -> 0x00
+                val previous = lastPlayerPosition
+                if (flags and 0x07 != 0 && previous == null) {
+                    _protocolEvents.tryEmit("Relative teleport received before an absolute position; coordinates were not published.")
+                    return
                 }
-                writeVarInt(keepAliveReply, replyPacketId)
-                writeLong(keepAliveReply, keepAliveId)
-                sendProtocolPacket(keepAliveReply.toByteArray())
-            } catch (_: Exception) {}
-        }
-
-        // 3. Ping packet in Play state (0x35 in 1.21.1)
-        if (packetId in listOf(0x35, 0x37) && payload.size == 4) {
-            try {
-                val pingStream = ByteArrayInputStream(payload)
-                val pingId = pingStream.read() or (pingStream.read() shl 8) or (pingStream.read() shl 16) or (pingStream.read() shl 24)
-                val pong = ByteArrayOutputStream()
-                writeVarInt(pong, if (protocol >= 767) 0x27 else 0x24)
-                pong.write(pingId and 0xFF)
-                pong.write((pingId shr 8) and 0xFF)
-                pong.write((pingId shr 16) and 0xFF)
-                pong.write((pingId shr 24) and 0xFF)
-                sendProtocolPacket(pong.toByteArray())
-            } catch (_: Exception) {}
-        }
-
-        // 4. Chat extraction from modern chat packets
-        try {
-            extractAndEmitChat(packetId, payload, protocol)
-        } catch (_: Exception) {}
-    }
-
-    private fun extractAndEmitChat(packetId: Int, payload: ByteArray, protocol: Int) {
-        val textCandidate = String(payload, StandardCharsets.UTF_8)
-        if (textCandidate.contains("\"text\"") || textCandidate.contains("translate") || textCandidate.contains("\"extra\"")) {
-            val parsed = parseDisconnectReason(textCandidate)
-            if (parsed.isNotBlank() && !parsed.startsWith("{")) {
-                val chatPair = parseChatSenderAndContent(parsed)
-                _chatMessages.tryEmit(chatPair)
+                val absoluteX = if (flags and 0x01 != 0) previous!!.first + x else x
+                val absoluteY = if (flags and 0x02 != 0) previous!!.second + y else y
+                val absoluteZ = if (flags and 0x04 != 0) previous!!.third + z else z
+                val absolutePosition = Triple(absoluteX, absoluteY, absoluteZ)
+                val absoluteYaw = if (flags and 0x08 != 0) lastPlayerYaw + yaw else yaw
+                val absolutePitch = if (flags and 0x10 != 0) lastPlayerPitch + pitch else pitch
+                lastPlayerPosition = absolutePosition
+                lastPlayerYaw = absoluteYaw
+                lastPlayerPitch = absolutePitch
+                _spawnPosition.tryEmit(absolutePosition)
             }
+            ids.playKeepAlive -> {
+                val id = readLong(stream)
+                val reply = ByteArrayOutputStream()
+                writeVarInt(reply, ids.playKeepAliveResponse)
+                writeLong(reply, id)
+                sendProtocolPacket(reply.toByteArray())
+            }
+            ids.playPing -> {
+                val id = readInt(stream)
+                val pong = ByteArrayOutputStream()
+                writeVarInt(pong, ids.playPong)
+                writeInt(pong, id)
+                sendProtocolPacket(pong.toByteArray())
+            }
+            ids.playDisconnect -> {
+                _protocolEvents.tryEmit("Server sent a Play disconnect packet. Its NBT reason component is not decoded by this client.")
+                throw EOFException("Server disconnected during Play; NBT reason decoding is unsupported.")
+            }
+            ids.playStartConfiguration -> {
+                val ack = ByteArrayOutputStream()
+                writeVarInt(ack, ids.playConfigurationAcknowledged)
+                sendProtocolPacket(ack.toByteArray())
+                setConnectionState(ProtocolState.CONFIGURATION)
+                sendClientInformation(isConfigurationState = true)
+            }
+            ids.playPlayerChat -> {
+                val senderUuid = UUID(readLong(stream), readLong(stream))
+                readVarInt(stream) // message index
+                val hasSignature = stream.read()
+                if (hasSignature == 1) {
+                    val signature = ByteArray(256)
+                    readFully(stream, signature)
+                } else if (hasSignature != 0) {
+                    throw IllegalStateException("Invalid optional signature flag in player chat packet")
+                }
+                val plainMessage = readString(stream)
+                _chatMessages.tryEmit(Pair(senderUuid.toString(), plainMessage))
+            }
+            ids.playSystemChat -> {
+                _protocolEvents.tryEmit("Received system-chat packet; NBT text-component decoding is unsupported.")
+            }
+            ids.playBlockUpdate -> {
+                val update = Protocol767BlockUpdateDecoder.decode(payload)
+                confirmedBlockStates.apply(update)
+                _blockUpdates.tryEmit(update)
+            }
+            else -> _protocolEvents.tryEmit("Received unhandled protocol 767 play packet id 0x${packetId.toString(16)}.")
         }
     }
 
-    private fun parseChatSenderAndContent(rawText: String): Pair<String, String> {
-        val clean = cleanFormattingCodes(rawText).trim()
-        val matchAngle = Regex("""^<([a-zA-Z0-9_]{2,16})>\s*(.*)$""").find(clean)
-        if (matchAngle != null) {
-            return Pair(matchAngle.groupValues[1], matchAngle.groupValues[2])
+    /**
+     * Send an absolute player position/rotation update using the protocol-767
+     * serverbound Player Position And Rotation packet. This reports a requested
+     * position; it is not proof that the server accepted the movement.
+     */
+    suspend fun sendPlayerPosition(
+        x: Double,
+        y: Double,
+        z: Double,
+        yaw: Float = lastPlayerYaw,
+        pitch: Float = lastPlayerPitch,
+        onGround: Boolean = false
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY) return@withContext false
+        if (!x.isFinite() || !y.isFinite() || !z.isFinite() || !yaw.isFinite() || !pitch.isFinite()) {
+            return@withContext false
         }
-        val matchColon = Regex("""^([a-zA-Z0-9_]{2,16}):\s*(.*)$""").find(clean)
-        if (matchColon != null) {
-            return Pair(matchColon.groupValues[1], matchColon.groupValues[2])
+        try {
+            sendProtocolPacket(MinecraftPlayPacketEncoder.positionRotation(x, y, z, yaw, pitch, onGround))
+            true
+        } catch (e: Exception) {
+            _protocolEvents.tryEmit("Movement packet write failed: ${e.message ?: e.javaClass.simpleName}")
+            false
         }
-        val matchBracket = Regex("""^\[([a-zA-Z0-9_]{2,16})\]\s*(.*)$""").find(clean)
-        if (matchBracket != null) {
-            return Pair(matchBracket.groupValues[1], matchBracket.groupValues[2])
+    }
+
+    /**
+     * Walk in short position increments toward a coordinate. This is straight-line
+     * movement only: without decoded chunk collision data it is not obstacle-aware
+     * pathfinding. Success means packets were written locally, not that the server
+     * accepted the final position.
+     */
+    suspend fun walkToCoordinates(
+        targetX: Double,
+        targetY: Double,
+        targetZ: Double,
+        maxDistance: Double = 64.0,
+        stepLength: Double = 0.25,
+        stepDelayMs: Long = 50L
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY) return@withContext false
+        val start = lastPlayerPosition ?: return@withContext false
+        if (!targetX.isFinite() || !targetY.isFinite() || !targetZ.isFinite() ||
+            !maxDistance.isFinite() || maxDistance <= 0.0 ||
+            !stepLength.isFinite() || stepLength <= 0.0 || stepDelayMs < 0L
+        ) return@withContext false
+
+        val waypoints = try {
+            MinecraftMovementPlanner.plan(
+                start = start,
+                target = Triple(targetX, targetY, targetZ),
+                maxDistance = maxDistance,
+                stepLength = stepLength
+            )
+        } catch (e: IllegalArgumentException) {
+            _protocolEvents.tryEmit("Walk request rejected: ${e.message}")
+            return@withContext false
         }
-        return Pair("Server", clean)
+        if (waypoints.isEmpty()) return@withContext true
+
+        val dx = targetX - start.first
+        val dz = targetZ - start.third
+        val yaw = Math.toDegrees(kotlin.math.atan2(-dx, dz)).toFloat()
+        for ((index, waypoint) in waypoints.withIndex()) {
+            if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY) return@withContext false
+            val wrote = sendPlayerPosition(
+                waypoint.first, waypoint.second, waypoint.third,
+                yaw = yaw, pitch = lastPlayerPitch, onGround = true
+            )
+            if (!wrote) return@withContext false
+            if (index < waypoints.lastIndex && stepDelayMs > 0L) delay(stepDelayMs)
+        }
+        true
+    }
+
+    /**
+     * Send the two serverbound Player Action packets for a normal dig attempt.
+     * The server remains authoritative; callers must wait for a block update
+     * before treating the block as mined.
+     */
+    suspend fun mineBlock(x: Int, y: Int, z: Int, face: Int = 1): Boolean = withContext(Dispatchers.IO) {
+        if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY || face !in 0..5) {
+            return@withContext false
+        }
+        val player = lastPlayerPosition ?: return@withContext false
+        val dx = player.first - (x + 0.5)
+        val dy = (player.second + 1.62) - (y + 0.5)
+        val dz = player.third - (z + 0.5)
+        if (dx * dx + dy * dy + dz * dz > 36.0) {
+            _protocolEvents.tryEmit("Mining request rejected locally: target is outside the 6-block reach limit.")
+            return@withContext false
+        }
+        try {
+            val startSequence = nextBlockChangeSequence()
+            sendProtocolPacket(MinecraftPlayPacketEncoder.dig(0, x, y, z, face, startSequence))
+            delay(1000L) // conservative minimum attempt; exact break time requires block/tool state
+            val finishSequence = nextBlockChangeSequence()
+            sendProtocolPacket(MinecraftPlayPacketEncoder.dig(status = 2, x, y, z, face, finishSequence))
+            true
+        } catch (e: Exception) {
+            _protocolEvents.tryEmit("Mining packet write failed: ${e.message ?: e.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Request placement against a known adjacent block. This only transmits the
+     * interaction; a server block-update packet is required to confirm placement.
+     */
+    suspend fun placeBlock(
+        x: Int,
+        y: Int,
+        z: Int,
+        face: Int,
+        cursorX: Float = 0.5f,
+        cursorY: Float = 0.5f,
+        cursorZ: Float = 0.5f,
+        hand: Int = 0
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY ||
+            face !in 0..5 || hand !in 0..1 ||
+            cursorX !in 0f..1f || cursorY !in 0f..1f || cursorZ !in 0f..1f
+        ) return@withContext false
+        val player = lastPlayerPosition ?: return@withContext false
+        val dx = player.first - (x + 0.5)
+        val dy = (player.second + 1.62) - (y + 0.5)
+        val dz = player.third - (z + 0.5)
+        if (dx * dx + dy * dy + dz * dz > 36.0) {
+            _protocolEvents.tryEmit("Placement request rejected locally: target is outside the 6-block reach limit.")
+            return@withContext false
+        }
+        try {
+            val sequence = nextBlockChangeSequence()
+            sendProtocolPacket(MinecraftPlayPacketEncoder.placeBlock(
+                x, y, z, face, cursorX, cursorY, cursorZ, hand, sequence
+            ))
+            true
+        } catch (e: Exception) {
+            _protocolEvents.tryEmit("Block placement packet write failed: ${e.message ?: e.javaClass.simpleName}")
+            false
+        }
+    }
+
+    @Synchronized
+    private fun nextBlockChangeSequence(): Int {
+        blockChangeSequence = if (blockChangeSequence == Int.MAX_VALUE) 0 else blockChangeSequence + 1
+        return blockChangeSequence
     }
 
     suspend fun sendChatMessage(message: String): Boolean = withContext(Dispatchers.IO) {
@@ -804,26 +1087,24 @@ class MinecraftProtocolClient {
             val clean = message.trim().take(256)
             val bytes = ByteArrayOutputStream()
             if (clean.startsWith("/")) {
-                // Chat command
-                writeVarInt(bytes, if (currentProtocolVersion >= 767) 0x04 else 0x03)
-                writeString(bytes, clean.removePrefix("/"))
-                writeLong(bytes, System.currentTimeMillis())
-                writeLong(bytes, 0L) // salt
-                writeVarInt(bytes, 0)
-                writeVarInt(bytes, 0)
+                // Signed command packet support is not implemented for this protocol.
+                return@withContext false
             } else {
                 // Chat message
-                writeVarInt(bytes, if (currentProtocolVersion >= 767) 0x06 else 0x05)
+                val ids = ProtocolPacketRegistry.forProtocol(currentProtocolVersion)
+                    ?: return@withContext false
+                writeVarInt(bytes, ids.playChatMessage)
                 writeString(bytes, clean)
                 writeLong(bytes, System.currentTimeMillis())
                 writeLong(bytes, 0L)
                 bytes.write(0) // hasSignature = false
                 writeVarInt(bytes, 0) // message count
-                bytes.write(0) // acknowledgements
+                bytes.write(byteArrayOf(0, 0, 0)) // 20-bit message acknowledgement bitset
             }
             sendProtocolPacket(bytes.toByteArray())
             true
         } catch (e: Exception) {
+            _protocolEvents.tryEmit("Chat write failed: ${e.message ?: e.javaClass.simpleName}")
             false
         }
     }
@@ -834,12 +1115,14 @@ class MinecraftProtocolClient {
         packetListenerJob = null
         try {
             socket?.close()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            _protocolEvents.tryEmit("Socket cleanup failed: ${e.message ?: e.javaClass.simpleName}")
+        }
         socket = null
         inputStream = null
         outputStream = null
         compressionThreshold = -1
-        currentState = ProtocolState.HANDSHAKE
+        setConnectionState(ProtocolState.DISCONNECTED)
     }
 
     fun isCurrentlyConnected(): Boolean = isConnected && socket?.isConnected == true && socket?.isClosed == false
@@ -847,6 +1130,9 @@ class MinecraftProtocolClient {
     private fun readNextPacket(): Pair<Int, ByteArray> {
         val inStream = inputStream ?: throw EOFException("Socket not connected")
         val packetLength = readVarInt(inStream)
+        if (packetLength <= 0 || packetLength > MAX_PACKET_SIZE) {
+            throw IllegalStateException("Invalid Minecraft packet length: $packetLength")
+        }
 
         if (compressionThreshold < 0) {
             // Uncompressed packet
@@ -863,38 +1149,60 @@ class MinecraftProtocolClient {
             readFully(inStream, envelopeBytes)
             val envelopeStream = ByteArrayInputStream(envelopeBytes)
             val dataLength = readVarInt(envelopeStream)
+            if (dataLength < 0 || dataLength > MAX_PACKET_SIZE) {
+                throw IllegalStateException("Invalid uncompressed packet length: $dataLength")
+            }
 
             if (dataLength == 0) {
-                // Uncompressed data inside envelope
+                // Uncompressed data inside the compression envelope.
+                if (envelopeStream.available() <= 0 || envelopeStream.available() >= compressionThreshold) {
+                    throw IllegalStateException("Invalid uncompressed packet for compression threshold $compressionThreshold.")
+                }
                 val packetId = readVarInt(envelopeStream)
                 val remaining = ByteArray(envelopeStream.available())
-                envelopeStream.read(remaining)
-                return Pair(packetId, remaining)
-            } else {
-                // Compressed data inside envelope
-                val compressedPayload = ByteArray(envelopeStream.available())
-                envelopeStream.read(compressedPayload)
-
-                val inflater = Inflater()
-                val decompressed = ByteArray(dataLength)
-                try {
-                    inflater.setInput(compressedPayload)
-                    inflater.inflate(decompressed)
-                } finally {
-                    inflater.end()
-                }
-
-                val decompStream = ByteArrayInputStream(decompressed)
-                val packetId = readVarInt(decompStream)
-                val remaining = ByteArray(decompStream.available())
-                decompStream.read(remaining)
+                readFully(envelopeStream, remaining)
                 return Pair(packetId, remaining)
             }
+
+            if (dataLength < compressionThreshold) {
+                throw IllegalStateException("Compressed packet is smaller than the negotiated compression threshold.")
+            }
+
+            val compressedPayload = ByteArray(envelopeStream.available())
+            readFully(envelopeStream, compressedPayload)
+            val inflater = Inflater()
+            val decompressed = ByteArray(dataLength)
+            try {
+                inflater.setInput(compressedPayload)
+                var total = 0
+                while (!inflater.finished() && total < decompressed.size) {
+                    val count = inflater.inflate(decompressed, total, decompressed.size - total)
+                    if (count == 0) {
+                        if (inflater.needsDictionary()) throw IllegalStateException("Compressed packet requires an unsupported dictionary.")
+                        if (inflater.needsInput()) break
+                        throw IllegalStateException("Compressed packet decompressor made no progress.")
+                    }
+                    total += count
+                }
+                if (!inflater.finished() || total != dataLength || inflater.remaining != 0) {
+                    throw IllegalStateException("Compressed packet length does not match its declared size.")
+                }
+            } finally {
+                inflater.end()
+            }
+
+            val decompStream = ByteArrayInputStream(decompressed)
+            val packetId = readVarInt(decompStream)
+            val remaining = ByteArray(decompStream.available())
+            readFully(decompStream, remaining)
+            return Pair(packetId, remaining)
         }
     }
 
+    @Synchronized
     private fun sendProtocolPacket(payload: ByteArray) {
-        val out = outputStream ?: return
+        require(payload.isNotEmpty() && payload.size <= MAX_PACKET_SIZE) { "Invalid outgoing Minecraft packet size: ${payload.size}" }
+        val out = outputStream ?: throw EOFException("Socket output stream is unavailable")
         if (compressionThreshold < 0) {
             sendRawPacket(out, payload)
         } else {
@@ -933,6 +1241,7 @@ class MinecraftProtocolClient {
     }
 
     private fun sendRawPacket(out: OutputStream, payload: ByteArray) {
+        require(payload.isNotEmpty() && payload.size <= MAX_PACKET_SIZE) { "Invalid outgoing Minecraft packet size: ${payload.size}" }
         val packet = ByteArrayOutputStream()
         writeVarInt(packet, payload.size)
         packet.write(payload)
@@ -952,25 +1261,27 @@ class MinecraftProtocolClient {
     private fun readVarInt(input: InputStream): Int {
         var value = 0
         var size = 0
-        var b: Int
         while (true) {
-            b = input.read()
+            val b = input.read()
             if (b == -1) throw EOFException("End of stream while reading VarInt")
-            value = value or ((b and 127) shl (size++ * 7))
-            if (size > 5) throw RuntimeException("VarInt is too big")
-            if ((b and 128) != 128) break
+            if (size == 4 && (b and 0xF0) != 0) throw IllegalStateException("VarInt exceeds 32 bits.")
+            value = value or ((b and 127) shl (size * 7))
+            size++
+            if (size > 5) throw IllegalStateException("VarInt is too big.")
+            if ((b and 128) == 0) return value
         }
-        return value
     }
 
     private fun writeString(out: OutputStream, str: String) {
         val bytes = str.toByteArray(StandardCharsets.UTF_8)
+        require(bytes.size <= 32767 * 4) { "Minecraft string exceeds the supported byte length." }
         writeVarInt(out, bytes.size)
         out.write(bytes)
     }
 
     private fun readString(input: InputStream): String {
         val length = readVarInt(input)
+        if (length < 0 || length > 32767 * 4) throw IllegalStateException("Invalid Minecraft string length: $length")
         val buffer = ByteArray(length)
         readFully(input, buffer)
         return String(buffer, StandardCharsets.UTF_8)
@@ -980,6 +1291,16 @@ class MinecraftProtocolClient {
         for (i in 7 downTo 0) {
             out.write(((value ushr (i * 8)) and 0xFF).toInt())
         }
+    }
+
+    private fun readInt(input: InputStream): Int {
+        val bytes = ByteArray(4)
+        readFully(input, bytes)
+        return ByteBuffer.wrap(bytes).int
+    }
+
+    private fun writeInt(out: OutputStream, value: Int) {
+        out.write(ByteBuffer.allocate(4).putInt(value).array())
     }
 
     private fun readLong(input: InputStream): Long {
@@ -1033,24 +1354,7 @@ class MinecraftProtocolClient {
                 lower.contains("-rc")
     }
 
-    private fun extractProtocolFromDisconnectReason(reason: String): Int? {
-        val lower = reason.lowercase()
-        return when {
-            "1.21.4" in lower -> 769
-            "1.21.3" in lower || "1.21.2" in lower -> 768
-            "1.21.1" in lower || "1.21" in lower -> 767
-            "1.20.6" in lower || "1.20.5" in lower -> 766
-            "1.20.4" in lower || "1.20.3" in lower -> 765
-            "1.20.2" in lower -> 764
-            "1.20.1" in lower || "1.20" in lower -> 763
-            "1.19.4" in lower -> 762
-            "1.19.2" in lower -> 760
-            "1.16.5" in lower -> 754
-            "1.12.2" in lower -> 340
-            "1.8" in lower -> 47
-            else -> null
-        }
-    }
+
 
     private fun parseDescription(descObj: Any?): String {
         return when (descObj) {
@@ -1095,7 +1399,9 @@ class MinecraftProtocolClient {
                 if (combined.isNotBlank()) {
                     return cleanFormattingCodes(combined)
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                _protocolEvents.tryEmit("Text component parsing failed: ${e.message ?: e.javaClass.simpleName}")
+            }
         }
         return cleanFormattingCodes(trimmed)
     }
