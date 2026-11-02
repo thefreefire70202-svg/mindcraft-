@@ -4,7 +4,6 @@ import com.example.BuildConfig
 import com.example.data.model.AiProvider
 import com.example.data.model.AiSettings
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -67,9 +66,7 @@ class AiClient(
         }
 
         if (effectiveKey.isBlank() || effectiveKey == "MY_GEMINI_API_KEY") {
-            // Provide intelligent local Mindcraft fallback if API key is not yet set
-            delay(400)
-            return generateMindcraftOfflineReasoning(prompt, "Gemini ($modelName - Offline Simulation)", startTime)
+            return unavailableResponse("Gemini", modelName, startTime, "Gemini API key is missing.")
         }
 
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$effectiveKey"
@@ -91,8 +88,7 @@ class AiClient(
         startTime: Long
     ): AiResponse {
         if (apiKey.isBlank()) {
-            delay(350)
-            return generateMindcraftOfflineReasoning(prompt, "OpenAI ($model - Offline Simulation)", startTime)
+            return unavailableResponse("OpenAI", model, startTime, "OpenAI API key is missing.")
         }
 
         val url = "https://api.openai.com/v1/chat/completions"
@@ -122,8 +118,7 @@ class AiClient(
         startTime: Long
     ): AiResponse {
         if (apiKey.isBlank()) {
-            delay(400)
-            return generateMindcraftOfflineReasoning(prompt, "Claude ($model - Offline Simulation)", startTime)
+            return unavailableResponse("Anthropic", model, startTime, "Anthropic API key is missing.")
         }
 
         val url = "https://api.anthropic.com/v1/messages"
@@ -191,8 +186,7 @@ class AiClient(
         startTime: Long
     ): AiResponse {
         if (apiKey.isBlank()) {
-            delay(150) // Groq is ultra-fast
-            return generateMindcraftOfflineReasoning(prompt, "Groq ($model - Offline Simulation)", startTime)
+            return unavailableResponse("Groq", model, startTime, "Groq API key is missing.")
         }
 
         val url = "https://api.groq.com/openai/v1/chat/completions"
@@ -300,81 +294,28 @@ class AiClient(
         modelId: String,
         startTime: Long
     ): AiResponse {
-        // Fast edge on-device inference: computes instant response without cloud round-trip
-        delay(120) // Fast 120ms edge latency
-        val modelLabel = when (modelId) {
-            "smollm2-360m" -> "SmolLM2 360M (Local Edge)"
-            "qwen2.5-0.5b" -> "Qwen 2.5 0.5B (Local Edge)"
-            else -> "TinyLlama 1.1B (Local Edge)"
-        }
-        return generateMindcraftOfflineReasoning(prompt, modelLabel, startTime)
-    }
-
-    private fun generateMindcraftOfflineReasoning(
-        prompt: String,
-        providerLabel: String,
-        startTime: Long
-    ): AiResponse {
-        val lower = prompt.lowercase()
-        val thoughts: String
-        val commands = mutableListOf<String>()
-        val chat: String
-
-        when {
-            "zombie" in lower || "skeleton" in lower || "spider" in lower || "creeper" in lower || "attack" in lower -> {
-                thoughts = "Hostile mob detected nearby! Equipping weapon, maintaining combat spacing, and preparing counter-strike."
-                commands.add("!equip(iron_sword)")
-                commands.add("!defendFrom(hostile_mob)")
-                chat = "Defending position against nearby hostile mobs!"
-            }
-            "wood" in lower || "tree" in lower || "oak" in lower || "chop" in lower -> {
-                thoughts = "Objective: Harvest wood logs for crafting tools and shelter. Locating nearest tree trunk."
-                commands.add("!equip(iron_axe)")
-                commands.add("!mine(oak_log, 4)")
-                commands.add("!craft(oak_planks, 16)")
-                chat = "Gathering oak logs and preparing planks."
-            }
-            "stone" in lower || "cobblestone" in lower || "iron" in lower || "mine" in lower -> {
-                thoughts = "Mining objective recognized. Equipping pickaxe, checking illumination torches, and digging target vein."
-                commands.add("!equip(diamond_pickaxe)")
-                commands.add("!mine(iron_ore, 3)")
-                commands.add("!place(torch)")
-                chat = "Mining iron ore and placing safety torches."
-            }
-            "build" in lower || "house" in lower || "shelter" in lower -> {
-                thoughts = "Architecture task received: Calculating footprint (5x5 foundation), laying perimeter stone blocks."
-                commands.add("!goTo(130, 64, -250)")
-                commands.add("!buildFoundation(cobblestone, 5, 5)")
-                chat = "Beginning 5x5 foundation layout at current coordinates."
-            }
-            "follow" in lower || "come" in lower -> {
-                thoughts = "Player follow request detected. Engaging Mineflayer pathfinder towards player coordinates."
-                commands.add("!follow(closest_player)")
-                chat = "Understood! Following your lead."
-            }
-            "eat" in lower || "hunger" in lower || "food" in lower -> {
-                thoughts = "Hunger bar depleted. Consuming cooked beef from hotbar to restore sprint capability."
-                commands.add("!eat(cooked_beef)")
-                chat = "Eating cooked beef to restore stamina."
-            }
-            else -> {
-                thoughts = "Perceiving surrounding terrain: Plains biome, clear visibility. Patrolling perimeter and watching for player commands."
-                commands.add("!patrol(10)")
-                commands.add("!lookAround()")
-                chat = "Andy standing by. Coordinates locked at (128, 64, -256). What shall we build or gather?"
-            }
-        }
-
-        val latency = System.currentTimeMillis() - startTime
-        return AiResponse(
-            thoughtProcess = thoughts,
-            commands = commands,
-            chatMessage = chat,
-            latencyMs = latency,
-            providerUsed = providerLabel,
-            isSuccess = true
+        return unavailableResponse(
+            "Local model",
+            modelId,
+            startTime,
+            "No on-device model runtime is installed. Select a configured cloud provider or install a real local model runtime."
         )
     }
+
+    private fun unavailableResponse(
+        provider: String,
+        model: String,
+        startTime: Long,
+        reason: String
+    ): AiResponse = AiResponse(
+        thoughtProcess = "AI request was not executed.",
+        commands = emptyList(),
+        chatMessage = reason,
+        latencyMs = System.currentTimeMillis() - startTime,
+        providerUsed = "$provider ($model)",
+        isSuccess = false,
+        errorMessage = reason
+    )
 
     private fun parseMindcraftOutput(raw: String, latency: Long, providerName: String): AiResponse {
         val lines = raw.lines()
