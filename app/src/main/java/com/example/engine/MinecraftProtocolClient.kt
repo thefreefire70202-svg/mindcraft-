@@ -295,15 +295,6 @@ class MinecraftProtocolClient {
 
                 val ping = System.currentTimeMillis() - startTime
 
-                // 4. Send Ping Request Packet (ID: 0x01) with timestamp to cleanly complete SLP exchange
-                try {
-                    val pingReq = ByteArrayOutputStream()
-                    writeVarInt(pingReq, 0x01)
-                    val pbb = ByteBuffer.allocate(8).putLong(System.currentTimeMillis())
-                    pingReq.write(pbb.array())
-                    sendRawPacket(outStream, pingReq.toByteArray())
-                } catch (_: Exception) {}
-
                 // Parse Server JSON response
                 val json = JSONObject(jsonResponse)
                 val versionObj = json.optJSONObject("version")
@@ -354,7 +345,9 @@ class MinecraftProtocolClient {
             } finally {
                 try {
                     s?.close()
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    _protocolEvents.tryEmit("Status socket cleanup failed: ${e.message ?: e.javaClass.simpleName}")
+                }
             }
         }
 
@@ -456,9 +449,6 @@ class MinecraftProtocolClient {
             val s = Socket()
             s.tcpNoDelay = true
             s.keepAlive = true
-            try {
-                s.trafficClass = 0x10 // IPTOS_LOWDELAY
-            } catch (_: Exception) {}
             s.soTimeout = timeoutMs
             s.connect(InetSocketAddress(targetHost, port), timeoutMs)
             socket = s
@@ -876,7 +866,9 @@ class MinecraftProtocolClient {
         packetListenerJob = null
         try {
             socket?.close()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            _protocolEvents.tryEmit("Socket cleanup failed: ${e.message ?: e.javaClass.simpleName}")
+        }
         socket = null
         inputStream = null
         outputStream = null
@@ -1130,7 +1122,9 @@ class MinecraftProtocolClient {
                 if (combined.isNotBlank()) {
                     return cleanFormattingCodes(combined)
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                _protocolEvents.tryEmit("Text component parsing failed: ${e.message ?: e.javaClass.simpleName}")
+            }
         }
         return cleanFormattingCodes(trimmed)
     }
