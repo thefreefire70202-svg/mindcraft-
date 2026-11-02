@@ -176,6 +176,8 @@ class MinecraftProtocolClient {
     private var packetListenerJob: Job? = null
     private var lastPlayerPosition: Triple<Double, Double, Double>? = null
     private var blockChangeSequence: Int = 0
+    @Volatile private var lastPlayerYaw: Float = 0f
+    @Volatile private var lastPlayerPitch: Float = 0f
 
     private fun setConnectionState(state: ProtocolState) {
         currentState = state
@@ -823,7 +825,11 @@ class MinecraftProtocolClient {
                 val absoluteY = if (flags and 0x02 != 0) previous!!.second + y else y
                 val absoluteZ = if (flags and 0x04 != 0) previous!!.third + z else z
                 val absolutePosition = Triple(absoluteX, absoluteY, absoluteZ)
+                val absoluteYaw = if (flags and 0x08 != 0) lastPlayerYaw + yaw else yaw
+                val absolutePitch = if (flags and 0x10 != 0) lastPlayerPitch + pitch else pitch
                 lastPlayerPosition = absolutePosition
+                lastPlayerYaw = absoluteYaw
+                lastPlayerPitch = absolutePitch
                 _spawnPosition.tryEmit(absolutePosition)
             }
             ids.playKeepAlive -> {
@@ -880,8 +886,8 @@ class MinecraftProtocolClient {
         x: Double,
         y: Double,
         z: Double,
-        yaw: Float = 0f,
-        pitch: Float = 0f,
+        yaw: Float = lastPlayerYaw,
+        pitch: Float = lastPlayerPitch,
         onGround: Boolean = false
     ): Boolean = withContext(Dispatchers.IO) {
         if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY) return@withContext false
@@ -917,6 +923,7 @@ class MinecraftProtocolClient {
         try {
             val startSequence = nextBlockChangeSequence()
             sendProtocolPacket(MinecraftPlayPacketEncoder.dig(status = 0, x, y, z, face, startSequence))
+            delay(1000L) // conservative minimum attempt; exact break time requires block/tool state
             val finishSequence = nextBlockChangeSequence()
             sendProtocolPacket(MinecraftPlayPacketEncoder.dig(status = 2, x, y, z, face, finishSequence))
             true
