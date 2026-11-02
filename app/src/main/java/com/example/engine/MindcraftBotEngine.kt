@@ -301,7 +301,7 @@ class MindcraftBotEngine(
                 val cleanMsg = message.trim()
                 when {
                     cleanMsg.equals("!help", ignoreCase = true) -> {
-                        sendChatReply("[Mindcraft] Available: !help, !coords, !status, !stop, or speak naturally. Mining and crafting are unsupported.", "Help reply")
+                        sendChatReply("[Mindcraft] Commands: !coords, !status, !move x y z, !mine x y z [face], !place x y z face, !stop. Crafting is not implemented.", "Help reply")
                     }
                     cleanMsg.equals("!coords", ignoreCase = true) || cleanMsg.equals("!pos", ignoreCase = true) -> {
                         val state = _botState.value
@@ -522,6 +522,13 @@ class MindcraftBotEngine(
                 log(LogLevel.WARN, LogCategory.ACTION, "Unsupported game command '$command'. No action was sent.")
                 return
             }
+        }
+        if (result) {
+            _botState.value = _botState.value.copy(
+                telemetry = _botState.value.telemetry.copy(
+                    actionsExecuted = _botState.value.telemetry.actionsExecuted + 1
+                )
+            )
         }
         log(
             if (result) LogLevel.INFO else LogLevel.WARN,
