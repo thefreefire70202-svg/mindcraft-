@@ -140,7 +140,7 @@ class MindcraftBotEngine(
                 rawHost = cleanHost,
                 rawPort = effectivePort,
                 username = cleanBotName,
-                protocolVersionOverride = if (detectedProtocol > 0) detectedProtocol else null,
+                protocolVersionOverride = overrideProtocol,
                 knownVersionName = detectedVersionName,
                 knownIsSnapshot = detectedIsSnapshot,
                 scope = coroutineScope
@@ -169,7 +169,7 @@ class MindcraftBotEngine(
                     rawHost = cleanHost,
                     rawPort = effectivePort,
                     username = cleanBotName,
-                    protocolVersionOverride = if (detectedProtocol > 0) detectedProtocol else null,
+                    protocolVersionOverride = overrideProtocol,
                     knownVersionName = detectedVersionName,
                     knownIsSnapshot = detectedIsSnapshot,
                     scope = coroutineScope
