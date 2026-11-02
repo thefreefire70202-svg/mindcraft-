@@ -58,4 +58,12 @@ class MinecraftProtocolClientHostParsingTest {
             MinecraftProtocolClient.parseHostAndPort("play.example.net:not-a-port")
         }
     }
+    @Test
+    fun identifiesCommonBedrockDefaultPortsWithoutTreatingThemAsProof() {
+        assertEquals(true, MinecraftProtocolClient.isLikelyBedrockPort(19132))
+        assertEquals(true, MinecraftProtocolClient.isLikelyBedrockPort(19133))
+        assertEquals(false, MinecraftProtocolClient.isLikelyBedrockPort(25565))
+        assertEquals(false, MinecraftProtocolClient.isLikelyBedrockPort(53750))
+    }
+
 }
