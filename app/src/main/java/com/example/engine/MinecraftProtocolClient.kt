@@ -367,8 +367,25 @@ class MinecraftProtocolClient {
             var loginSuccess = false
             var loginResult: ConnectResult? = null
 
-            while (!loginSuccess && isCurrentlyConnected()) {
+            while ((!loginSuccess || (protocol >= 764 && currentState != ProtocolState.PLAY)) && isCurrentlyConnected()) {
                 val (packetId, payload) = readNextPacket()
+
+                // Login Success is not a completed session on 1.20.2+.
+                // Keep consuming Configuration packets until the server sends Finish Configuration.
+                if (loginSuccess && protocol >= 764) {
+                    handleConfigurationPacket(packetId, payload, protocol)
+                    if (currentState == ProtocolState.PLAY) {
+                        loginResult = ConnectResult(
+                            isSuccess = true,
+                            message = "Joined $versionName server (Protocol: $protocol) as '$username'. Configuration completed.",
+                            protocolVersionUsed = protocol,
+                            versionName = versionName,
+                            isSnapshot = isSnapshot
+                        )
+                        break
+                    }
+                    continue
+                }
 
                 when (packetId) {
                     0x00 -> {
@@ -401,39 +418,27 @@ class MinecraftProtocolClient {
                         break
                     }
                     0x02 -> {
-                        // Login Success!
+                        // Login Success. Modern protocol versions must finish Configuration before success.
                         loginSuccess = true
                         if (protocol >= 764) {
-                            // In 1.20.2+, acknowledge login to transition to Configuration phase
-                            try {
-                                val ackBytes = ByteArrayOutputStream()
-                                writeVarInt(ackBytes, 0x03) // Login Acknowledged
-                                sendProtocolPacket(ackBytes.toByteArray())
-                                currentState = ProtocolState.CONFIGURATION
-
-                                // Send Client Information in Configuration phase (packet 0x00)
-                                sendClientInformation(isConfigurationState = true)
-                            } catch (_: Exception) {}
+                            val ackBytes = ByteArrayOutputStream()
+                            writeVarInt(ackBytes, 0x03) // Serverbound Login Acknowledged
+                            sendProtocolPacket(ackBytes.toByteArray())
+                            currentState = ProtocolState.CONFIGURATION
+                            sendClientInformation(isConfigurationState = true)
+                            socket?.soTimeout = 45000
                         } else {
                             currentState = ProtocolState.PLAY
+                            socket?.soTimeout = 45000
+                            loginResult = ConnectResult(
+                                isSuccess = true,
+                                message = "Joined $versionName server (Protocol: $protocol) as '$username'.",
+                                protocolVersionUsed = protocol,
+                                versionName = versionName,
+                                isSnapshot = isSnapshot
+                            )
+                            break
                         }
-
-                        // Set socket read timeout to 45 seconds (TCP keepalive / watchdog)
-                        socket?.soTimeout = 45000
-
-                        // Start background packet handler to answer Keep-Alive & read Chat
-                        if (scope != null) {
-                            startPacketListenerLoop(scope, protocol)
-                        }
-
-                        loginResult = ConnectResult(
-                            isSuccess = true,
-                            message = "Joined $versionName server (Protocol: $protocol${if (isSnapshot) " [Snapshot]" else ""}) as '$username'.",
-                            protocolVersionUsed = protocol,
-                            versionName = versionName,
-                            isSnapshot = isSnapshot
-                        )
-                        break
                     }
                     0x03 -> {
                         // Set Compression
@@ -468,13 +473,22 @@ class MinecraftProtocolClient {
                 }
             }
 
-            loginResult ?: ConnectResult(
+            val completedResult = loginResult ?: ConnectResult(
                 isSuccess = false,
-                message = "Login timed out or connection closed before Login Success.",
+                message = if (loginSuccess && protocol >= 764) {
+                    "Login succeeded, but Minecraft Configuration did not complete."
+                } else {
+                    "Login timed out or connection closed before Login Success."
+                },
                 protocolVersionUsed = protocol,
                 versionName = versionName,
                 isSnapshot = isSnapshot
             )
+
+            if (completedResult.isSuccess && scope != null) {
+                startPacketListenerLoop(scope, protocol)
+            }
+            completedResult
         } catch (e: Exception) {
             disconnect()
             ConnectResult(
