@@ -34,12 +34,13 @@ Restore the intended Mindcraft-style Minecraft bot experience on Android:
 
 - PR #1 contains the first-stage honesty and connection-state repairs.
 - Protocol registry and packet handling are currently limited to protocol 767; this is not broad Minecraft version support.
-- Protocol-767 movement, mining-at-coordinate, and block-placement packet writers exist. Mining and placement are requests only; server block updates are not decoded, so success is not confirmed.
+- Protocol-767 movement, mining-at-coordinate, and block-placement packet writers exist. Mining and placement are requests only; server block updates are not yet wired into the live socket handler, so success is not confirmed.
 - Coordinate movement now emits bounded 0.25-block straight-line waypoints (up to 64 blocks) rather than a single large position jump. This is not collision-aware pathfinding; no chunk/block collision map is available yet.
-- Added a bounded, pure Kotlin A* voxel pathfinder with two-block player clearance, solid-floor support, cardinal-only movement, one-block step-up/drop, lava rejection, and conservative handling of unknown blocks; unit tests cover open paths, obstacle detours, unknown terrain, lava, and stepping. This planner is not yet connected to live navigation because protocol chunk/block-state decoding is still missing.
-- Automated tests now cover the waypoint planner and protocol-767 movement/mining/placement packet encoders, alongside host/port parsing tests.
-- Full game-state decoding (inventory, health, hunger, chunks and block updates), obstacle-aware navigation, crafting, chests, equipment, food, combat, survival, SRV DNS, broader protocol support, local AI inference, foreground service, secure credential storage, and proper database migrations remain unfinished.
-- The current branch head has not yet been confirmed by a successful test/build run. Do not describe the app as finished or release-ready until the remaining milestones are implemented and validated.
+- Added a bounded, pure Kotlin A* voxel pathfinder with two-block player clearance, solid-floor support, cardinal-only movement, one-block step-up/drop, lava rejection, and conservative handling of unknown blocks; unit tests cover open paths, obstacle detours, unknown terrain, lava, and stepping. This planner is not yet connected to live navigation.
+- Added an isolated protocol-767 single-block-update payload decoder and server-reported block-state store, with tests for signed coordinates, VarInt state IDs, malformed payloads, and server-reported air. This is not yet wired to the packet listener, and does not decode chunk sections, palettes, collision shapes, or block names.
+- Automated tests also cover the waypoint planner and protocol-767 movement/mining/placement packet encoders, alongside host/port parsing tests.
+- Full game-state decoding (inventory, health, hunger, chunk sections and block updates), obstacle-aware navigation, confirmed mining/placement, crafting, chests, equipment, food, combat, survival, SRV DNS, broader protocol support, local AI inference, foreground service, secure credential storage, and proper database migrations remain unfinished.
+- CI/test/build status for the latest branch commits must be checked before claiming validation. Do not describe the app as finished or release-ready until the remaining milestones are implemented and validated.
 
 ## Working rule
 
