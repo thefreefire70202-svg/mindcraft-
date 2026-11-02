@@ -107,7 +107,8 @@ private data class ProtocolPacketIds(
     val playChatMessage: Int,
     val playKeepAliveResponse: Int,
     val playPositionRotation: Int,
-    val playPong: Int
+    val playPong: Int,
+    val playClientInformation: Int
 )
 
 private object ProtocolPacketRegistry {
@@ -146,7 +147,8 @@ private object ProtocolPacketRegistry {
             playChatMessage = 0x06,
             playKeepAliveResponse = 0x18,
             playPositionRotation = 0x1B,
-            playPong = 0x2D
+            playPong = 0x2D,
+            playClientInformation = 0x0E
         )
         else -> null
     }
@@ -434,18 +436,6 @@ class MinecraftProtocolClient {
         // 3. Perform connection with the version-specific packet registry
         val attemptResult = performLoginHandshake(host, port, username, detectedProtocol, detectedName, isSnapshot, timeoutMs, scope)
 
-        // 4. If server disconnected with an "Outdated" message, extract the required version and auto-retry!
-        if (!attemptResult.isSuccess && attemptResult.message.contains("Outdated", ignoreCase = true)) {
-            val retryProtocol = extractProtocolFromDisconnectReason(attemptResult.message)
-            if (retryProtocol != null && retryProtocol != detectedProtocol) {
-                disconnect()
-                currentProtocolVersion = retryProtocol
-                currentVersionName = "Auto-corrected ($retryProtocol)"
-                setCachedProtocol(host, port, retryProtocol, currentVersionName, isSnapshot)
-                return@withContext performLoginHandshake(host, port, username, retryProtocol, currentVersionName, isSnapshot, timeoutMs, scope)
-            }
-        }
-
         attemptResult
     }
 
@@ -480,7 +470,7 @@ class MinecraftProtocolClient {
             // 1. Send Handshake Packet with NextState = 2 (Login)
             val handshakeBytes = ByteArrayOutputStream()
             writeVarInt(handshakeBytes, 0x00) // Packet ID
-            writeVarInt(handshakeBytes, protocol) // Auto-detected protocol (e.g. 767 for 1.21.1)
+            writeVarInt(handshakeBytes, protocol) // Auto-detected protocol from the detected server version
             writeString(handshakeBytes, host)
             handshakeBytes.write((port shr 8) and 0xFF)
             handshakeBytes.write(port and 0xFF)
@@ -520,7 +510,7 @@ class MinecraftProtocolClient {
             var loginSuccess = false
             var loginResult: ConnectResult? = null
 
-            while ((!loginSuccess || (protocol >= 764 && currentState != ProtocolState.PLAY_READY)) && isCurrentlyConnected()) {
+            while ((!loginSuccess || currentState != ProtocolState.PLAY_READY) && isCurrentlyConnected()) {
                 val (packetId, payload) = readNextPacket()
 
                 // Login Success is not a completed session on 1.20.2+.
@@ -663,7 +653,7 @@ class MinecraftProtocolClient {
             // Packet IDs are selected from the protocol-specific registry.
             val packetIds = ProtocolPacketRegistry.forProtocol(currentProtocolVersion)
                 ?: throw UnsupportedOperationException("No client-information packet registry for protocol $currentProtocolVersion")
-            writeVarInt(bytes, if (isConfigurationState) packetIds.configClientInformation else 0x0E)
+            writeVarInt(bytes, if (isConfigurationState) packetIds.configClientInformation else packetIds.playClientInformation)
             writeString(bytes, "en_us")
             bytes.write(8) // view distance = 8 chunks
             writeVarInt(bytes, 0) // chat mode: 0 (enabled)
@@ -1096,24 +1086,7 @@ class MinecraftProtocolClient {
                 lower.contains("-rc")
     }
 
-    private fun extractProtocolFromDisconnectReason(reason: String): Int? {
-        val lower = reason.lowercase()
-        return when {
-            "1.21.4" in lower -> 769
-            "1.21.3" in lower || "1.21.2" in lower -> 768
-            "1.21.1" in lower || "1.21" in lower -> 767
-            "1.20.6" in lower || "1.20.5" in lower -> 766
-            "1.20.4" in lower || "1.20.3" in lower -> 765
-            "1.20.2" in lower -> 764
-            "1.20.1" in lower || "1.20" in lower -> 763
-            "1.19.4" in lower -> 762
-            "1.19.2" in lower -> 760
-            "1.16.5" in lower -> 754
-            "1.12.2" in lower -> 340
-            "1.8" in lower -> 47
-            else -> null
-        }
-    }
+
 
     private fun parseDescription(descObj: Any?): String {
         return when (descObj) {
