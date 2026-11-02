@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -158,7 +159,14 @@ class MinecraftProtocolClient {
     private var isConnected = false
     private var compressionThreshold = -1
     private var currentState = ProtocolState.DISCONNECTED
+    private val _connectionState = kotlinx.coroutines.flow.MutableStateFlow(ProtocolState.DISCONNECTED)
+    val connectionState: kotlinx.coroutines.flow.StateFlow<ProtocolState> = _connectionState.asStateFlow()
     private var packetListenerJob: Job? = null
+
+    private fun setConnectionState(state: ProtocolState) {
+        currentState = state
+        _connectionState.value = state
+    }
 
     private val protocolCache = ConcurrentHashMap<String, CachedServerProtocol>()
     private val lastContactTimestamps = ConcurrentHashMap<String, Long>()
@@ -183,18 +191,36 @@ class MinecraftProtocolClient {
     companion object {
         fun parseHostAndPort(rawHost: String, defaultPort: Int = 25565): Pair<String, Int> {
             val clean = rawHost.trim()
-                .removePrefix("http://")
-                .removePrefix("https://")
-                .removePrefix("minecraft://")
-                .trimEnd('/')
-            return if (clean.contains(":")) {
-                val parts = clean.split(":")
-                val h = parts[0].trim()
-                val p = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: defaultPort
-                Pair(h, p)
-            } else {
-                Pair(clean, defaultPort)
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .removePrefix("minecraft://")
+            .trimEnd('/')
+        require(defaultPort in 1..65535) { "Port must be between 1 and 65535." }
+
+        if (clean.startsWith("[")) {
+            val closingBracket = clean.indexOf(']')
+            require(closingBracket > 1) { "Invalid bracketed IPv6 address." }
+            val host = clean.substring(1, closingBracket)
+            val suffix = clean.substring(closingBracket + 1)
+            val port = if (suffix.isBlank()) defaultPort else {
+                require(suffix.startsWith(":")) { "Expected :port after bracketed IPv6 address." }
+                suffix.drop(1).toIntOrNull()?.also { require(it in 1..65535) }
+                    ?: throw IllegalArgumentException("Invalid server port.")
             }
+            return Pair(host, port)
+        }
+
+        val colonCount = clean.count { it == ':' }
+        if (colonCount > 1) return Pair(clean, defaultPort)
+        if (colonCount == 1) {
+            val separator = clean.lastIndexOf(':')
+            val host = clean.substring(0, separator).trim()
+            val port = clean.substring(separator + 1).trim().toIntOrNull()
+                ?: throw IllegalArgumentException("Invalid server port.")
+            require(host.isNotBlank() && port in 1..65535) { "Invalid server host or port." }
+            return Pair(host, port)
+        }
+        return Pair(clean, defaultPort)
         }
     }
 
@@ -276,7 +302,7 @@ class MinecraftProtocolClient {
                 val json = JSONObject(jsonResponse)
                 val versionObj = json.optJSONObject("version")
                 val versionName = versionObj?.optString("name", "Minecraft Server") ?: "Minecraft Server"
-                val protocolVer = versionObj?.optInt("protocol", 767) ?: 767
+                val protocolVer = versionObj?.optInt("protocol", 0) ?: 0
 
                 val playersObj = json.optJSONObject("players")
                 val onlinePlayers = playersObj?.optInt("online", 0) ?: 0
@@ -285,6 +311,12 @@ class MinecraftProtocolClient {
                 val descObj = json.opt("description")
                 val motd = parseDescription(descObj)
 
+                if (protocolVer <= 0) {
+                    return@withContext ServerStatusResult(
+                        isOnline = false,
+                        error = "Server status response did not include a valid protocol version."
+                    )
+                }
                 val snapshot = isSnapshotVersion(versionName, protocolVer)
 
                 setCachedProtocol(host, port, protocolVer, versionName, snapshot)
@@ -438,7 +470,7 @@ class MinecraftProtocolClient {
             outputStream = s.getOutputStream()
             isConnected = true
             compressionThreshold = -1
-            currentState = ProtocolState.TCP_CONNECTED
+            setConnectionState(ProtocolState.TCP_CONNECTED)
             lastContactTimestamps["$host:$port"] = System.currentTimeMillis()
 
             // 1. Send Handshake Packet with NextState = 2 (Login)
@@ -451,7 +483,7 @@ class MinecraftProtocolClient {
             writeVarInt(handshakeBytes, 2) // Next State = 2 (Login)
 
             sendRawPacket(outputStream!!, handshakeBytes.toByteArray())
-            currentState = ProtocolState.HANDSHAKE_SENT
+            setConnectionState(ProtocolState.HANDSHAKE_SENT)
 
             // 2. Send Login Start Packet (Packet ID 0x00 in Login State)
             val offlineUuid = UUID.nameUUIDFromBytes("OfflinePlayer:$username".toByteArray(StandardCharsets.UTF_8))
@@ -478,7 +510,7 @@ class MinecraftProtocolClient {
             }
 
             sendProtocolPacket(loginBytes.toByteArray())
-            currentState = ProtocolState.LOGIN_STARTED
+            setConnectionState(ProtocolState.LOGIN_STARTED)
 
             // 3. Read Login Response packets until Login Success (0x02) or error
             var loginSuccess = false
@@ -537,16 +569,16 @@ class MinecraftProtocolClient {
                     packetIds.loginSuccess -> {
                         // Login Success. Modern protocol versions must finish Configuration before success.
                         loginSuccess = true
-                        currentState = ProtocolState.LOGIN_SUCCESS
+                        setConnectionState(ProtocolState.LOGIN_SUCCESS)
                         if (protocol >= 764) {
                             val ackBytes = ByteArrayOutputStream()
                             writeVarInt(ackBytes, packetIds.loginAcknowledged) // Serverbound Login Acknowledged
                             sendProtocolPacket(ackBytes.toByteArray())
-                            currentState = ProtocolState.CONFIGURATION
+                            setConnectionState(ProtocolState.CONFIGURATION)
                             sendClientInformation(isConfigurationState = true)
                             socket?.soTimeout = 45000
                         } else {
-                            currentState = ProtocolState.PLAY_READY
+                            setConnectionState(ProtocolState.PLAY_READY)
                             socket?.soTimeout = 45000
                             loginResult = ConnectResult(
                                 isSuccess = true,
@@ -609,7 +641,7 @@ class MinecraftProtocolClient {
             completedResult
         } catch (e: Exception) {
             disconnect()
-            currentState = ProtocolState.ERROR
+            setConnectionState(ProtocolState.ERROR)
             ConnectResult(
                 isSuccess = false,
                 message = e.localizedMessage ?: "Failed to connect to server",
@@ -624,7 +656,7 @@ class MinecraftProtocolClient {
     fun sendClientInformation(isConfigurationState: Boolean) {
             val bytes = ByteArrayOutputStream()
             // In CONFIGURATION state, Client Information is packet 0x00
-            // In PLAY state, Client Information is packet 0x09 (in 1.21.1) or 0x08 (in 1.20.4)
+            // Packet IDs are selected from the protocol-specific registry.
             val packetIds = ProtocolPacketRegistry.forProtocol(currentProtocolVersion)
                 ?: throw UnsupportedOperationException("No client-information packet registry for protocol $currentProtocolVersion")
             writeVarInt(bytes, if (isConfigurationState) packetIds.configClientInformation else 0x0E)
@@ -675,7 +707,7 @@ class MinecraftProtocolClient {
                 disconnectReason = "TCP error: ${e.localizedMessage}"
             } finally {
                 isConnected = false
-                if (disconnectReason != "Connection closed normally") currentState = ProtocolState.ERROR
+                if (disconnectReason != "Connection closed normally") setConnectionState(ProtocolState.ERROR)
                 _disconnectEvent.tryEmit(disconnectReason)
             }
         }
@@ -735,7 +767,7 @@ class MinecraftProtocolClient {
         writeVarInt(finishAck, ids.configFinishAck)
         sendProtocolPacket(finishAck.toByteArray())
         sendClientInformation(isConfigurationState = false)
-        currentState = ProtocolState.PLAY_READY
+        setConnectionState(ProtocolState.PLAY_READY)
     }
 
     private fun handleConfigPluginMessage(stream: InputStream, protocol: Int) {
@@ -823,13 +855,8 @@ class MinecraftProtocolClient {
             val clean = message.trim().take(256)
             val bytes = ByteArrayOutputStream()
             if (clean.startsWith("/")) {
-                // Chat command
-                return@withContext false // Command packet signing is not implemented.
-                writeString(bytes, clean.removePrefix("/"))
-                writeLong(bytes, System.currentTimeMillis())
-                writeLong(bytes, 0L) // salt
-                writeVarInt(bytes, 0)
-                writeVarInt(bytes, 0)
+                // Signed command packet support is not implemented for this protocol.
+                return@withContext false
             } else {
                 // Chat message
                 val ids = ProtocolPacketRegistry.forProtocol(currentProtocolVersion)
@@ -860,7 +887,7 @@ class MinecraftProtocolClient {
         inputStream = null
         outputStream = null
         compressionThreshold = -1
-        currentState = ProtocolState.DISCONNECTED
+        setConnectionState(ProtocolState.DISCONNECTED)
     }
 
     fun isCurrentlyConnected(): Boolean = isConnected && socket?.isConnected == true && socket?.isClosed == false
