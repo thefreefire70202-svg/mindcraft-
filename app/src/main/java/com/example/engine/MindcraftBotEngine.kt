@@ -317,8 +317,13 @@ class MindcraftBotEngine(
                         sendChatReply("[Mindcraft] Connection: ${s.status}. Health, food and inventory are unavailable because those server packets are not decoded yet.", "Status reply")
                     }
                     cleanMsg.startsWith("!mine", ignoreCase = true) -> {
-                        sendChatReply("[Mindcraft] Mining is unsupported; no mining action was performed.", "Unsupported mining reply")
-                        log(LogLevel.WARN, LogCategory.ACTION, "$sender requested mining, but no real mining action is available.")
+                        executeParsedCommand(cleanMsg.removePrefix("!"))
+                    }
+                    cleanMsg.startsWith("!move", ignoreCase = true) -> {
+                        executeParsedCommand(cleanMsg.removePrefix("!"))
+                    }
+                    cleanMsg.startsWith("!place", ignoreCase = true) -> {
+                        executeParsedCommand(cleanMsg.removePrefix("!"))
                     }
                     cleanMsg.startsWith("!craft", ignoreCase = true) -> {
                         sendChatReply("[Mindcraft] Crafting is unsupported; no crafting action was performed.", "Unsupported crafting reply")
@@ -465,10 +470,64 @@ class MindcraftBotEngine(
     }
 
     private suspend fun executeParsedCommand(command: String) {
+        val parts = command.trim().split(Regex("\\s+"))
+        val action = parts.firstOrNull()?.lowercase().orEmpty()
+        val values = parts.drop(1)
+        val result = when (action) {
+            "move" -> {
+                if (values.size != 3) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Usage: !move <x> <y> <z>")
+                    return
+                }
+                val x = values[0].toDoubleOrNull()
+                val y = values[1].toDoubleOrNull()
+                val z = values[2].toDoubleOrNull()
+                if (x == null || y == null || z == null) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Move command requires three numeric coordinates.")
+                    return
+                }
+                protocolClient.sendPlayerPosition(x, y, z)
+            }
+            "mine" -> {
+                if (values.size !in 3..4) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Usage: !mine <x> <y> <z> [face]")
+                    return
+                }
+                val x = values[0].toIntOrNull()
+                val y = values[1].toIntOrNull()
+                val z = values[2].toIntOrNull()
+                val face = values.getOrNull(3)?.toIntOrNull() ?: 1
+                if (x == null || y == null || z == null) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Mine command requires integer block coordinates.")
+                    return
+                }
+                protocolClient.mineBlock(x, y, z, face)
+            }
+            "place" -> {
+                if (values.size != 4) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Usage: !place <x> <y> <z> <face>")
+                    return
+                }
+                val x = values[0].toIntOrNull()
+                val y = values[1].toIntOrNull()
+                val z = values[2].toIntOrNull()
+                val face = values[3].toIntOrNull()
+                if (x == null || y == null || z == null || face == null) {
+                    log(LogLevel.WARN, LogCategory.ACTION, "Place command requires integer coordinates and face 0-5.")
+                    return
+                }
+                protocolClient.placeBlock(x, y, z, face)
+            }
+            else -> {
+                log(LogLevel.WARN, LogCategory.ACTION, "Unsupported game command '$command'. No action was sent.")
+                return
+            }
+        }
         log(
-            LogLevel.WARN,
+            if (result) LogLevel.INFO else LogLevel.WARN,
             LogCategory.ACTION,
-            "Ignored unsupported game command '$command'. No Minecraft action was executed."
+            if (result) "Action packet(s) written for '$command'. Server-side success is not yet confirmed."
+            else "Action '$command' was not sent. Check connection, current position, reach, and command syntax."
         )
     }
 
