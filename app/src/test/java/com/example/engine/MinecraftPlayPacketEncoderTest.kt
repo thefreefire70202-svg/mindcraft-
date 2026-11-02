@@ -38,7 +38,9 @@ class MinecraftPlayPacketEncoderTest {
         val packed = input.readLong()
         assertEquals(4, (packed shr 38).toInt())
         assertEquals(65, (packed and 0xFFFL).toInt())
-        assertEquals(-7, ((packed shr 12) and 0x3FFFFFFL).toInt())
+        val zBits = ((packed shr 12) and 0x3FFFFFFL).toInt()
+        val decodedZ = if ((zBits and (1 shl 25)) != 0) zBits or (-1 shl 26) else zBits
+        assertEquals(-7, decodedZ)
         assertEquals(1, input.readUnsignedByte())
         assertEquals(9, input.readUnsignedByte())
         assertEquals(0, input.available())
