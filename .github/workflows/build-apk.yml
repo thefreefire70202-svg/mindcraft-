@@ -1,7 +1,8 @@
 name: Build Mindcraft APK
 
 on:
-  # Run validation only when explicitly requested; routine source commits do not start tests.:
+  # Run validation only when explicitly requested; routine source commits do not start tests.
+  workflow_dispatch::
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
