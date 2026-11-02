@@ -110,6 +110,8 @@ private data class ProtocolPacketIds(
     val playChatMessage: Int,
     val playKeepAliveResponse: Int,
     val playPositionRotation: Int,
+    val playBlockDig: Int,
+    val playBlockPlace: Int,
     val playPong: Int,
     val playClientInformation: Int
 )
@@ -153,6 +155,8 @@ private object ProtocolPacketRegistry {
             playChatMessage = 0x06,
             playKeepAliveResponse = 0x18,
             playPositionRotation = 0x1B,
+            playBlockDig = 0x24,
+            playBlockPlace = 0x38,
             playPong = 0x2D,
             playClientInformation = 0x0E
         )
@@ -171,6 +175,7 @@ class MinecraftProtocolClient {
     val connectionState: kotlinx.coroutines.flow.StateFlow<ProtocolState> = _connectionState.asStateFlow()
     private var packetListenerJob: Job? = null
     private var lastPlayerPosition: Triple<Double, Double, Double>? = null
+    private var blockChangeSequence: Int = 0
 
     private fun setConnectionState(state: ProtocolState) {
         currentState = state
@@ -864,6 +869,105 @@ class MinecraftProtocolClient {
             }
             else -> _protocolEvents.tryEmit("Received unhandled protocol 767 play packet id 0x${packetId.toString(16)}.")
         }
+    }
+
+    /**
+     * Send an absolute player position/rotation update using the protocol-767
+     * serverbound Player Position And Rotation packet. This reports a requested
+     * position; it is not proof that the server accepted the movement.
+     */
+    suspend fun sendPlayerPosition(
+        x: Double,
+        y: Double,
+        z: Double,
+        yaw: Float = 0f,
+        pitch: Float = 0f,
+        onGround: Boolean = false
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY) return@withContext false
+        if (!x.isFinite() || !y.isFinite() || !z.isFinite() || !yaw.isFinite() || !pitch.isFinite()) {
+            return@withContext false
+        }
+        try {
+            sendProtocolPacket(MinecraftPlayPacketEncoder.positionRotation(x, y, z, yaw, pitch, onGround))
+            true
+        } catch (e: Exception) {
+            _protocolEvents.tryEmit("Movement packet write failed: ${e.message ?: e.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Send the two serverbound Player Action packets for a normal dig attempt.
+     * The server remains authoritative; callers must wait for a block update
+     * before treating the block as mined.
+     */
+    suspend fun mineBlock(x: Int, y: Int, z: Int, face: Int = 1): Boolean = withContext(Dispatchers.IO) {
+        if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY || face !in 0..5) {
+            return@withContext false
+        }
+        val player = lastPlayerPosition ?: return@withContext false
+        val dx = player.first - (x + 0.5)
+        val dy = (player.second + 1.62) - (y + 0.5)
+        val dz = player.third - (z + 0.5)
+        if (dx * dx + dy * dy + dz * dz > 36.0) {
+            _protocolEvents.tryEmit("Mining request rejected locally: target is outside the 6-block reach limit.")
+            return@withContext false
+        }
+        try {
+            val startSequence = nextBlockChangeSequence()
+            sendProtocolPacket(MinecraftPlayPacketEncoder.dig(status = 0, x, y, z, face, startSequence))
+            val finishSequence = nextBlockChangeSequence()
+            sendProtocolPacket(MinecraftPlayPacketEncoder.dig(status = 2, x, y, z, face, finishSequence))
+            true
+        } catch (e: Exception) {
+            _protocolEvents.tryEmit("Mining packet write failed: ${e.message ?: e.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Request placement against a known adjacent block. This only transmits the
+     * interaction; a server block-update packet is required to confirm placement.
+     */
+    suspend fun placeBlock(
+        x: Int,
+        y: Int,
+        z: Int,
+        face: Int,
+        cursorX: Float = 0.5f,
+        cursorY: Float = 0.5f,
+        cursorZ: Float = 0.5f,
+        hand: Int = 0
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isCurrentlyConnected() || currentState != ProtocolState.PLAY_READY ||
+            face !in 0..5 || hand !in 0..1 ||
+            cursorX !in 0f..1f || cursorY !in 0f..1f || cursorZ !in 0f..1f
+        ) return@withContext false
+        val player = lastPlayerPosition ?: return@withContext false
+        val dx = player.first - (x + 0.5)
+        val dy = (player.second + 1.62) - (y + 0.5)
+        val dz = player.third - (z + 0.5)
+        if (dx * dx + dy * dy + dz * dz > 36.0) {
+            _protocolEvents.tryEmit("Placement request rejected locally: target is outside the 6-block reach limit.")
+            return@withContext false
+        }
+        try {
+            val sequence = nextBlockChangeSequence()
+            sendProtocolPacket(MinecraftPlayPacketEncoder.placeBlock(
+                x, y, z, face, cursorX, cursorY, cursorZ, hand, sequence
+            ))
+            true
+        } catch (e: Exception) {
+            _protocolEvents.tryEmit("Block placement packet write failed: ${e.message ?: e.javaClass.simpleName}")
+            false
+        }
+    }
+
+    @Synchronized
+    private fun nextBlockChangeSequence(): Int {
+        blockChangeSequence = if (blockChangeSequence == Int.MAX_VALUE) 0 else blockChangeSequence + 1
+        return blockChangeSequence
     }
 
     suspend fun sendChatMessage(message: String): Boolean = withContext(Dispatchers.IO) {
