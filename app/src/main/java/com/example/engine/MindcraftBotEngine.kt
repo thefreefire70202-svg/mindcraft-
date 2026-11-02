@@ -248,6 +248,7 @@ class MindcraftBotEngine(
                     val pos = Position3D(x = x, y = y, z = z)
                     _botState.value = _botState.value.copy(
                         position = pos,
+                        hasPositionUpdate = true,
                         activeTask = "In-game at (${x.toInt()}, ${y.toInt()}, ${z.toInt()})"
                     )
                     log(LogLevel.SUCCESS, LogCategory.PERCEPTION, "Spawned in world at (${x.toInt()}, ${y.toInt()}, ${z.toInt()})")
@@ -270,6 +271,16 @@ class MindcraftBotEngine(
                 }
             }
 
+            launch {
+                protocolClient.protocolEvents.collect { event ->
+                    log(LogLevel.WARN, LogCategory.NETWORK, event)
+                }
+            }
+
+            protocolClient.connectionState.collect { phase ->
+                log(LogLevel.INFO, LogCategory.NETWORK, "Minecraft protocol state: $phase")
+            }
+
             protocolClient.chatMessages.collect { (sender, message) ->
                 val isSelf = sender.equals(_botState.value.botName, ignoreCase = true) || sender.equals("MindcraftBot", ignoreCase = true)
                 val chatMsg = ChatMessage(sender = sender, message = message, isBot = isSelf)
@@ -283,13 +294,19 @@ class MindcraftBotEngine(
                 val cleanMsg = message.trim()
                 when {
                     cleanMsg.equals("!help", ignoreCase = true) -> {
-                        protocolClient.sendChatMessage("[Mindcraft] Commands: !help, !coords, !status, !mine <block>, !craft <item>, or speak naturally!")
+                        protocolClient.sendChatMessage("[Mindcraft] Available: !help, !coords, !status, !stop, or speak naturally. Mining and crafting are unsupported.")
                         log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !help to $sender")
                     }
                     cleanMsg.equals("!coords", ignoreCase = true) || cleanMsg.equals("!pos", ignoreCase = true) -> {
-                        val pos = _botState.value.position
-                        protocolClient.sendChatMessage("[Mindcraft] Bot position: X=${pos.x.toInt()}, Y=${pos.y.toInt()}, Z=${pos.z.toInt()}")
-                        log(LogLevel.SUCCESS, LogCategory.CHAT, "Replied !coords to $sender")
+                        val state = _botState.value
+                        if (state.hasPositionUpdate) {
+                            val pos = state.position
+                            protocolClient.sendChatMessage("[Mindcraft] Position: X=${pos.x.toInt()}, Y=${pos.y.toInt()}, Z=${pos.z.toInt()}")
+                            log(LogLevel.INFO, LogCategory.CHAT, "Replied to !coords using the latest server position packet.")
+                        } else {
+                            protocolClient.sendChatMessage("[Mindcraft] Position is unavailable; the server has not supplied a position packet.")
+                            log(LogLevel.WARN, LogCategory.CHAT, "Could not answer !coords because no position packet has been received.")
+                        }
                     }
                     cleanMsg.equals("!status", ignoreCase = true) -> {
                         val s = _botState.value
