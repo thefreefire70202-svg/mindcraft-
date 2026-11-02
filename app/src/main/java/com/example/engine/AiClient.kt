@@ -318,29 +318,42 @@ class AiClient(
     )
 
     private fun parseMindcraftOutput(raw: String, latency: Long, providerName: String): AiResponse {
+        if (raw.isBlank()) {
+            return AiResponse(
+                thoughtProcess = "The provider returned an empty response.",
+                commands = emptyList(),
+                chatMessage = "",
+                latencyMs = latency,
+                providerUsed = providerName,
+                isSuccess = false,
+                errorMessage = "The AI provider returned HTTP success but no usable response text."
+            )
+        }
+
         val lines = raw.lines()
         val commands = mutableListOf<String>()
         val thoughts = StringBuilder()
-        var chatMsg = ""
+        val chatLines = mutableListOf<String>()
 
         for (line in lines) {
             val trimmed = line.trim()
             if (trimmed.startsWith("!")) {
                 commands.add(trimmed)
             } else if (trimmed.startsWith("Andy:") || trimmed.startsWith("Bot:")) {
-                chatMsg = trimmed.substringAfter(":").trim()
+                chatLines.add(trimmed.substringAfter(":").trim())
             } else if (trimmed.isNotBlank()) {
-                if (thoughts.isNotEmpty()) thoughts.append(" ")
+                if (thoughts.isNotEmpty()) thoughts.append("\\n")
                 thoughts.append(trimmed)
             }
         }
 
-        if (chatMsg.isBlank()) {
-            chatMsg = if (commands.isNotEmpty()) "Executing: ${commands.joinToString(", ")}" else "Understood."
+        // A provider's actual text is the response. Never synthesize a success message.
+        val chatMsg = chatLines.joinToString("\\n").ifBlank {
+            if (commands.isEmpty()) raw.trim() else ""
         }
 
         return AiResponse(
-            thoughtProcess = thoughts.toString().ifBlank { "Evaluated current Minecraft environment and generated tactical actions." },
+            thoughtProcess = thoughts.toString(),
             commands = commands,
             chatMessage = chatMsg,
             latencyMs = latency,
