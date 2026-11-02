@@ -216,6 +216,9 @@ class MinecraftProtocolClient {
     companion object {
         private const val MAX_PACKET_SIZE = 2 * 1024 * 1024
 
+        /** Common default ports for Bedrock Dedicated Server; this is a hint, not proof of server edition. */
+        fun isLikelyBedrockPort(port: Int): Boolean = port == 19132 || port == 19133
+
         fun parseHostAndPort(rawHost: String, defaultPort: Int = 25565): Pair<String, Int> {
             val clean = rawHost.trim()
             .removePrefix("http://")
@@ -356,7 +359,7 @@ class MinecraftProtocolClient {
             } catch (e: Exception) {
                 lastContactTimestamps["$host:$port"] = System.currentTimeMillis()
                 val friendlyError = when {
-                    port == 19132 || port == 19133 ->
+                    isLikelyBedrockPort(port) ->
                         "Port $port is commonly used by Minecraft Bedrock Edition (UDP). This app currently supports Java Edition over TCP, not Bedrock. If your server is Java Edition, confirm that you entered its Java TCP port."
                     e is java.net.UnknownHostException -> "Could not resolve hostname '$host'. Check server address."
                     e is java.net.ConnectException -> "Connection refused. Server may be offline (start it in your Aternos panel) or port $port is closed."
@@ -423,8 +426,8 @@ class MinecraftProtocolClient {
             val status = queryServerStatus(host, port, timeoutMs.coerceAtLeast(7500))
             if (!status.isOnline || status.protocolVersion <= 0) {
                 setConnectionState(ProtocolState.ERROR)
-                val bedrockPortHint = when (port) {
-                    19132, 19133 -> " Port $port is commonly used by Minecraft Bedrock Edition (UDP). This app currently implements Minecraft Java Edition over TCP, so it cannot join a Bedrock server. Use the server's Java Edition address and Java port, or a Java-to-Bedrock proxy that exposes a Java TCP endpoint."
+                val bedrockPortHint = when {
+                    isLikelyBedrockPort(port) -> " Port $port is commonly used by Minecraft Bedrock Edition (UDP). This app currently implements Minecraft Java Edition over TCP, so it cannot join a Bedrock server. Use the server's Java Edition address and Java port, or a Java-to-Bedrock proxy that exposes a Java TCP endpoint."
                     else -> ""
                 }
                 val statusReason = status.error ?: "The server did not provide a valid Java Edition status response."
